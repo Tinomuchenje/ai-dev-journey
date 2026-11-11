@@ -65,12 +65,54 @@ object Wallpapers {
         ),
     )
 
-    val count get() = styles.size
+    /** Index 0 is "Ambient", which is not a fixed picture: it follows the focused tile. */
+    val count get() = styles.size + 1
 
-    fun name(index: Int) = styles[index.mod(styles.size)].name
+    fun isAmbient(index: Int) = index.mod(count) == 0
+
+    fun name(index: Int) = if (isAmbient(index)) "Ambient (follows the highlight)" else styles[index.mod(count) - 1].name
+
+    private val ambientCache = HashMap<Int, Bitmap>()
+
+    /**
+     * A near-black room lit by [color]: a wash from the top-left, a related hue rising from
+     * the bottom-right. Hues are bucketed so at most a couple of dozen small images exist.
+     */
+    fun ambient(color: Int): Bitmap {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(color, hsv)
+        val neutral = hsv[1] < 0.15f
+        val bucket = if (neutral) -1 else (hsv[0] / 15f).toInt()
+        ambientCache[bucket]?.let { return it }
+        val hue = if (neutral) 222f else bucket * 15f + 7.5f
+        val sat = if (neutral) 0.28f else 0.78f
+        fun tone(shift: Float, s: Float, v: Float) =
+            Color.HSVToColor(floatArrayOf((hue + shift + 360f) % 360f, s, v))
+
+        val w = 240
+        val h = 135
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)
+        p.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), c(0xFF08090D), c(0xFF0C0E14), Shader.TileMode.CLAMP)
+        canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        fun blob(x: Float, y: Float, r: Float, color: Int, strength: Float) {
+            p.shader = RadialGradient(
+                x * w, y * h, r * w,
+                intArrayOf(withAlpha(color, strength), withAlpha(color, strength * 0.42f), withAlpha(color, 0f)),
+                floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP
+            )
+            canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        }
+        blob(0.1f, -0.05f, 0.82f, tone(0f, sat, 0.6f), 0.58f)
+        blob(1.0f, 1.05f, 0.7f, tone(32f, sat * 0.9f, 0.48f), 0.42f)
+        blob(0.62f, 0.3f, 0.42f, tone(-22f, sat * 0.8f, 0.55f), 0.14f)
+        ambientCache[bucket] = bmp
+        return bmp
+    }
 
     fun make(index: Int, w: Int = 960, h: Int = 540): Bitmap {
-        val s = styles[index.mod(styles.size)]
+        val s = styles[(index.mod(count) - 1).coerceAtLeast(0)]
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)

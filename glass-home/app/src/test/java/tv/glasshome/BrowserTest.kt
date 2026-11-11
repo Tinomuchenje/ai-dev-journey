@@ -1,7 +1,6 @@
 package tv.glasshome
 
 import android.content.Intent
-import android.net.Uri
 import android.view.KeyEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -47,14 +46,6 @@ class BrowserTest {
         assertTrue(ua, ua.contains("X11; Linux x86_64"))
         assertFalse(ua, ua.contains("Mobile"))
         assertTrue(a.web.settings.javaScriptEnabled)
-    }
-
-    @Test
-    fun opensLinksSentByOtherApps() {
-        val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.org/shared"))
-            .setClass(RuntimeEnvironment.getApplication(), BrowserActivity::class.java)
-        val a = Robolectric.buildActivity(BrowserActivity::class.java, i).setup().get()
-        assertEquals("https://example.org/shared", shadowOf(a.web).lastLoadedUrl)
     }
 
     @Test

@@ -6,8 +6,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.drawable.BitmapDrawable
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
@@ -30,34 +30,47 @@ import android.widget.Toast
 import java.util.concurrent.Executors
 
 /**
- * The home screen: clock and quick actions on top, a strip of pinned favourites, a strip
- * of pinned websites, then every other app in a grid. Hold OK on anything for options.
+ * The home screen, laid out like a tvOS one: a large clock, a glass dock of favourites,
+ * then every other app in a grid of 16:9 artwork, then pinned websites. The backdrop is
+ * lit in the colour of whatever is focused. Hold OK on anything for its options.
  */
 class HomeActivity : Activity() {
 
     private lateinit var store: Store
+    private lateinit var backdrop: BackdropView
     private lateinit var scroll: CenterScrollView
-    private lateinit var favScroll: CenterHScrollView
-    private lateinit var favRow: RowLayout
-    private lateinit var favHint: TextView
+    private lateinit var dockHolder: FrameLayout
+    private lateinit var dock: DockLayout
+    private lateinit var dockHint: TextView
     private lateinit var siteRow: RowLayout
     private lateinit var grid: LinearLayout
-    private lateinit var netPill: PillView
+    private lateinit var netChip: ChipView
 
     private var apps: List<AppEntry> = emptyList()
+    private val siteArt = HashMap<String, Bitmap>()
     private var focusKey: String? = null
-    private var focusInFavorites = false
+    private var focusInDock = false
     private var firstRender = true
+    private var ambientTint = Tint.DEFAULT
 
     private val io = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
     private val side get() = u(96)
-    private val favW get() = u(320)
-    private val favH get() = u(180)
     private val columns = 6
     private val appW get() = (Dim.w - 2 * (side - TileView.PAD)) / columns - 2 * TileView.PAD
     private val appH get() = appW * 9 / 16
+
+    /** Artwork is rendered once at the largest size it is ever shown. */
+    private val artW get() = u(310)
+    private val artH get() = u(174)
+
+    /** Dock tiles shrink as the dock fills, like a desktop dock, instead of scrolling. */
+    private fun dockCardWidth(count: Int): Int {
+        val room = Dim.w - 2 * u(70) - 2 * DockLayout.INSET
+        val slot = minOf(artW + 2 * TileView.PAD, room / maxOf(count, 1))
+        return slot - 2 * TileView.PAD
+    }
 
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) = loadApps()
@@ -70,10 +83,17 @@ class HomeActivity : Activity() {
         super.onCreate(savedInstanceState)
         Dim.init(this)
         store = Store(this)
-        applyWallpaper()
         buildUi()
+        applyWallpaper(animate = false)
         render()
         loadApps()
+        // The room takes on the colour of whatever is focused.
+        window.decorView.viewTreeObserver.addOnGlobalFocusChangeListener { _, now ->
+            if (now is TileView) {
+                ambientTint = now.tint
+                applyWallpaper(animate = true)
+            }
+        }
 
         val pkg = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -128,13 +148,12 @@ class HomeActivity : Activity() {
     private fun goToTop() {
         val first = firstTile() ?: return
         first.requestFocus()
-        favScroll.smoothScrollTo(0, 0)
         scroll.smoothScrollTo(0, 0)
     }
 
     private fun firstTile(): View? = when {
-        favRow.childCount > 0 -> favRow.getChildAt(0)
-        (grid.getChildAt(0) as? ViewGroup)?.childCount ?: 0 > 0 -> (grid.getChildAt(0) as ViewGroup).getChildAt(0)
+        dock.childCount > 0 -> dock.getChildAt(0)
+        ((grid.getChildAt(0) as? ViewGroup)?.childCount ?: 0) > 0 -> (grid.getChildAt(0) as ViewGroup).getChildAt(0)
         else -> siteRow.getChildAt(0)
     }
 
@@ -146,11 +165,13 @@ class HomeActivity : Activity() {
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
     }
 
-    private fun applyWallpaper() {
-        val d = BitmapDrawable(resources, Wallpapers.make(store.wallpaper))
-        d.isFilterBitmap = true
-        d.setDither(true)
-        window.setBackgroundDrawable(d)
+    private val stills = HashMap<Int, Bitmap>()
+
+    private fun applyWallpaper(animate: Boolean) {
+        val index = store.wallpaper
+        val image = if (Wallpapers.isAmbient(index)) Wallpapers.ambient(ambientTint)
+        else stills.getOrPut(index) { Wallpapers.make(index) }
+        backdrop.show(image, animate)
     }
 
     // ---------------------------------------------------------------- layout
@@ -164,69 +185,83 @@ class HomeActivity : Activity() {
         setShadowLayer(uf(8f), 0f, uf(1f), 0x55000000)
     }
 
-    private fun header(text: String) = label(text, 30f, 0.92f).apply {
-        setPadding(side, u(18), side, u(2))
+    private fun header(text: String) = label(text, 30f, 0.95f).apply {
+        setPadding(side, u(26), side, u(4))
     }
 
     private fun buildUi() {
+        backdrop = BackdropView(this)
         scroll = CenterScrollView(this)
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             clipChildren = false
             clipToPadding = false
-            setPadding(0, 0, 0, u(80))
+            setPadding(0, 0, 0, u(90))
         }
         scroll.addView(column, MATCH_PARENT, WRAP_CONTENT)
 
-        // Top bar: clock on the left, quick actions on the right.
+        // Top of the screen: a big quiet clock, and three round glass buttons.
         val top = FrameLayout(this).apply {
             clipChildren = false
             clipToPadding = false
-            setPadding(side, u(40), side - u(10), 0)
+            setPadding(side, u(58), side - u(12), 0)
         }
         val clockColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         clockColumn.addView(TextClock(this).apply {
             format12Hour = "h:mm"
             format24Hour = "H:mm"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(72f))
-            typeface = Fonts.light
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(148f))
+            typeface = Fonts.thin
             includeFontPadding = false
-            setShadowLayer(uf(10f), 0f, uf(2f), 0x55000000)
+            letterSpacing = -0.02f
+            setShadowLayer(uf(18f), 0f, uf(3f), 0x40000000)
         })
         clockColumn.addView(TextClock(this).apply {
             format12Hour = "EEEE, d MMMM"
             format24Hour = "EEEE, d MMMM"
-            setTextColor(withAlpha(Color.WHITE, 0.75f))
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(26f))
+            setTextColor(withAlpha(Color.WHITE, 0.7f))
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(30f))
             typeface = Fonts.regular
             includeFontPadding = false
-            setPadding(u(4), u(6), 0, 0)
+            setPadding(u(8), u(4), 0, 0)
         })
         top.addView(clockColumn, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.START or Gravity.TOP))
 
-        val pills = RowLayout(this)
-        netPill = PillView(this, Glyphs.OFFLINE, "").apply { setOnClickListener { openNetworkSettings() } }
-        pills.addView(netPill)
-        pills.addView(PillView(this, Glyphs.GLOBE, "Browse").apply { setOnClickListener { openBrowser(null, false) } })
-        pills.addView(PillView(this, Glyphs.GEAR, "Settings").apply {
+        val chips = RowLayout(this)
+        netChip = ChipView(this, Glyphs.OFFLINE, "Network").apply { setOnClickListener { openNetworkSettings() } }
+        chips.addView(netChip)
+        chips.addView(ChipView(this, Glyphs.GLOBE, "Browser").apply { setOnClickListener { openBrowserHome() } })
+        chips.addView(ChipView(this, Glyphs.GEAR, "Settings").apply {
             setOnClickListener { launcherMenu() }
             setOnLongClickListener { openSystemSettings(); true }
         })
-        top.addView(pills, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.END or Gravity.TOP))
-        column.addView(top, MATCH_PARENT, u(176))
+        top.addView(chips, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.END or Gravity.TOP))
+        column.addView(top, MATCH_PARENT, u(318))
 
-        // Favourites.
-        column.addView(header("Favorites"))
-        favRow = RowLayout(this).apply { setPadding(side - TileView.PAD, 0, side - TileView.PAD, 0) }
-        favScroll = CenterHScrollView(this)
-        favScroll.addView(favRow, WRAP_CONTENT, WRAP_CONTENT)
-        column.addView(favScroll, MATCH_PARENT, WRAP_CONTENT)
-        favHint = label("Hold OK on any app or website to pin it here.", 26f, 0.6f).apply {
-            typeface = Fonts.regular
-            setPadding(side, u(34), side, u(34))
+        // The dock.
+        dockHolder = FrameLayout(this).apply {
+            clipChildren = false
+            clipToPadding = false
         }
-        column.addView(favHint)
+        dock = DockLayout(this)
+        dockHolder.addView(dock, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER_HORIZONTAL))
+        dockHint = label("Hold OK on any app to keep it here in the dock.", 28f, 0.6f).apply {
+            typeface = Fonts.regular
+            gravity = Gravity.CENTER
+            setPadding(side, u(70), side, u(70))
+        }
+        dockHolder.addView(dockHint, MATCH_PARENT, WRAP_CONTENT)
+        column.addView(dockHolder, MATCH_PARENT, WRAP_CONTENT)
+
+        // Everything else. No heading: like tvOS, the grid simply continues below the dock.
+        grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            clipChildren = false
+            clipToPadding = false
+            setPadding(side - TileView.PAD, u(22), side - TileView.PAD, 0)
+        }
+        column.addView(grid, MATCH_PARENT, WRAP_CONTENT)
 
         // Websites.
         column.addView(header("Websites"))
@@ -235,17 +270,8 @@ class HomeActivity : Activity() {
         siteScroll.addView(siteRow, WRAP_CONTENT, WRAP_CONTENT)
         column.addView(siteScroll, MATCH_PARENT, WRAP_CONTENT)
 
-        // Everything else.
-        column.addView(header("Apps"))
-        grid = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            clipChildren = false
-            clipToPadding = false
-            setPadding(side - TileView.PAD, 0, side - TileView.PAD, 0)
-        }
-        column.addView(grid, MATCH_PARENT, WRAP_CONTENT)
-
         val root = FrameLayout(this)
+        root.addView(backdrop, MATCH_PARENT, MATCH_PARENT)
         root.addView(scroll, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
     }
@@ -253,12 +279,12 @@ class HomeActivity : Activity() {
     // ---------------------------------------------------------------- data
 
     private fun loadApps() {
-        val bw = favW
-        val bh = favH
-        val iconSize = u(112)
+        val w = artW
+        val h = artH
+        val iconSize = u(128)
         io.execute {
             val list = try {
-                Apps.load(applicationContext, bw, bh, iconSize)
+                Apps.load(applicationContext, w, h, iconSize)
             } catch (e: Exception) {
                 emptyList()
             }
@@ -267,15 +293,16 @@ class HomeActivity : Activity() {
                 apps = list
                 seedIfNeeded()
                 render()
+                fetchSiteIcons()
             }
         }
     }
 
-    /** First run: pin the streaming apps that are installed and add a couple of sites. */
+    /** First run: put the streaming apps that are installed in the dock and add a couple of sites. */
     private fun seedIfNeeded() {
         if (store.seeded || apps.isEmpty()) return
         val byPackage = apps.associateBy { it.pkg }
-        store.favorites = Apps.STARTER_PACKAGES.mapNotNull { byPackage[it]?.key }.take(6)
+        store.favorites = Apps.STARTER_PACKAGES.mapNotNull { byPackage[it]?.key }.take(5)
         if (store.sites.isEmpty()) {
             store.addSite("YouTube TV", "https://www.youtube.com/tv", true)
             store.addSite("Google", "https://www.google.com", false)
@@ -283,10 +310,30 @@ class HomeActivity : Activity() {
         store.seeded = true
     }
 
+    /** Artwork for a pinned site: its real icon when we have it, otherwise its initial. */
+    private fun artFor(site: Site): Bitmap = siteArt.getOrPut(site.id) {
+        val icon = SiteIcons.cached(this, site)
+        if (icon != null) Art.tile(icon, artW, artH) else Art.monogram(site.monogram, Tint.fromText(site.host), artW, artH)
+    }
+
+    private fun fetchSiteIcons() {
+        val sites = store.sites
+        io.execute {
+            var changed = false
+            for (site in sites) {
+                if (SiteIcons.fetch(applicationContext, site)) {
+                    changed = true
+                    main.post { siteArt.remove(site.id) }
+                }
+            }
+            if (changed) main.post { if (!isDestroyed) render() }
+        }
+    }
+
     private fun render() {
         val current = focusedTile()
         val wantKey = focusKey ?: current?.key
-        val wantFav = if (focusKey != null) focusInFavorites else current?.parent === favRow
+        val wantDock = if (focusKey != null) focusInDock else current?.parent === dock
         focusKey = null
 
         val appByKey = apps.associateBy { it.key }
@@ -294,25 +341,20 @@ class HomeActivity : Activity() {
         val siteByKey = sites.associateBy { it.key }
         val hidden = store.hidden
 
-        favRow.removeAllViews()
-        for (key in store.favorites) {
+        // Dock: tiles shrink to fit rather than scroll.
+        val docked = store.favorites.filter { (appByKey[it] != null && it !in hidden) || siteByKey[it] != null }
+            .take(MAX_DOCK)
+        val dw = dockCardWidth(docked.size)
+        val dh = dw * 9 / 16
+        val drop = uf(42f) + TileView.PAD + DockLayout.INSET
+        dock.removeAllViews()
+        for (key in docked) {
             val app = appByKey[key]
-            val site = siteByKey[key]
-            if (app != null && key !in hidden) favRow.addView(appTile(app, favW, favH, true))
-            else if (site != null) favRow.addView(siteTile(site, favW, favH, true))
+            if (app != null) dock.addView(appTile(app, dw, dh, true, drop))
+            else dock.addView(siteTile(siteByKey.getValue(key), dw, dh, true, drop))
         }
-        val empty = favRow.childCount == 0
-        favHint.visibility = if (empty) View.VISIBLE else View.GONE
-        favScroll.visibility = if (empty) View.GONE else View.VISIBLE
-
-        siteRow.removeAllViews()
-        for (site in sites) siteRow.addView(siteTile(site, appW, appH, false))
-        siteRow.addView(TileView(this, appW, appH).apply {
-            key = "action:add-site"
-            label = "Add website"
-            glyph = Glyphs.PLUS
-            setOnClickListener { editSite(null) }
-        })
+        dock.visibility = if (docked.isEmpty()) View.GONE else View.VISIBLE
+        dockHint.visibility = if (docked.isEmpty()) View.VISIBLE else View.GONE
 
         grid.removeAllViews()
         for (chunk in apps.filter { it.key !in hidden }.chunked(columns)) {
@@ -321,7 +363,17 @@ class HomeActivity : Activity() {
             grid.addView(row, WRAP_CONTENT, WRAP_CONTENT)
         }
 
-        val target = (if (firstRender) null else findTile(wantKey, wantFav)) ?: firstTile()
+        siteRow.removeAllViews()
+        for (site in sites) siteRow.addView(siteTile(site, appW, appH, false))
+        siteRow.addView(TileView(this, appW, appH).apply {
+            key = "action:add-site"
+            label = "Add website"
+            glyph = Glyphs.PLUS
+            tint = 0xFFB8C4E0.toInt()
+            setOnClickListener { editSite(null) }
+        })
+
+        val target = (if (firstRender) null else findTile(wantKey, wantDock)) ?: firstTile()
         if (apps.isNotEmpty()) firstRender = false
         if (target != null) {
             // Also the fallback the system uses when it has to pick a highlight by itself.
@@ -330,7 +382,7 @@ class HomeActivity : Activity() {
         }
     }
 
-    private fun findTile(key: String?, preferFavorites: Boolean): View? {
+    private fun findTile(key: String?, preferDock: Boolean): View? {
         if (key == null) return null
         fun search(group: ViewGroup): View? {
             for (i in 0 until group.childCount) {
@@ -340,30 +392,30 @@ class HomeActivity : Activity() {
             }
             return null
         }
-        val inFav = search(favRow)
-        val elsewhere = search(siteRow) ?: search(grid)
-        return if (preferFavorites) inFav ?: elsewhere else elsewhere ?: inFav
+        val inDock = search(dock)
+        val elsewhere = search(grid) ?: search(siteRow)
+        return if (preferDock) inDock ?: elsewhere else elsewhere ?: inDock
     }
 
-    private fun appTile(app: AppEntry, w: Int, h: Int, inFavorites: Boolean) = TileView(this, w, h).apply {
-        key = app.key
-        label = app.label
-        icon = app.icon
-        banner = app.banner
-        tint = app.tint
-        if (app.icon == null && app.banner == null) monogram = app.label.take(1).uppercase()
-        setOnClickListener { launch(app) }
-        setOnLongClickListener { appMenu(app, inFavorites); true }
-    }
+    private fun appTile(app: AppEntry, w: Int, h: Int, inDock: Boolean, drop: Float = uf(42f)) =
+        TileView(this, w, h, drop).apply {
+            key = app.key
+            label = app.label
+            art = app.art
+            tint = app.tint
+            setOnClickListener { launch(app) }
+            setOnLongClickListener { appMenu(app, inDock); true }
+        }
 
-    private fun siteTile(site: Site, w: Int, h: Int, inFavorites: Boolean) = TileView(this, w, h).apply {
-        key = site.key
-        label = site.name
-        monogram = site.monogram
-        tint = Tint.fromText(site.host)
-        setOnClickListener { openBrowser(site.url, site.tvMode) }
-        setOnLongClickListener { siteMenu(site, inFavorites); true }
-    }
+    private fun siteTile(site: Site, w: Int, h: Int, inDock: Boolean, drop: Float = uf(42f)) =
+        TileView(this, w, h, drop).apply {
+            key = site.key
+            label = site.name
+            art = artFor(site)
+            tint = Tint.fromText(site.host)
+            setOnClickListener { openSite(site) }
+            setOnLongClickListener { siteMenu(site, inDock); true }
+        }
 
     // ---------------------------------------------------------------- actions
 
@@ -387,11 +439,59 @@ class HomeActivity : Activity() {
         )
     }
 
-    private fun openBrowser(url: String?, tvMode: Boolean) {
+    private fun openBuiltIn(url: String?, tvMode: Boolean) {
         val i = Intent(this, BrowserActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (url != null) i.putExtra(BrowserActivity.EXTRA_URL, url)
         i.putExtra(BrowserActivity.EXTRA_TV_MODE, tvMode)
         start(i)
+    }
+
+    /** The installed browser to hand websites to: Brave if present, else the TV's default. */
+    private fun externalBrowser(): String? {
+        val probe = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")).addCategory(Intent.CATEGORY_BROWSABLE)
+        val handlers = try {
+            packageManager.queryIntentActivities(probe, 0).mapNotNull { it.activityInfo?.packageName }
+        } catch (e: Exception) {
+            emptyList()
+        }.filter { it != packageName }.distinct()
+        if (handlers.isEmpty()) return null
+        val preferred = try {
+            packageManager.resolveActivity(probe, 0)?.activityInfo?.packageName
+        } catch (e: Exception) {
+            null
+        }
+        return handlers.firstOrNull { it.startsWith("com.brave.browser") }
+            ?: preferred?.takeIf { it in handlers }
+            ?: handlers.first()
+    }
+
+    private fun browserName(pkg: String): String =
+        apps.firstOrNull { it.pkg == pkg }?.label ?: try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (e: Exception) {
+            pkg
+        }
+
+    private fun openSite(site: Site) {
+        val external = if (store.preferBuiltInBrowser) null else externalBrowser()
+        if (external == null) {
+            openBuiltIn(site.url, site.tvMode)
+            return
+        }
+        start(
+            Intent(Intent.ACTION_VIEW, Uri.parse(site.url)).setPackage(external).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            Intent(this, BrowserActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(BrowserActivity.EXTRA_URL, site.url).putExtra(BrowserActivity.EXTRA_TV_MODE, site.tvMode),
+        )
+    }
+
+    /** The globe button: just open the browser. */
+    private fun openBrowserHome() {
+        val external = if (store.preferBuiltInBrowser) null else externalBrowser()
+        val launch = external?.let {
+            packageManager.getLaunchIntentForPackage(it) ?: packageManager.getLeanbackLaunchIntentForPackage(it)
+        }
+        if (launch != null) start(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else openBuiltIn(null, false)
     }
 
     private fun openSystemSettings() = start(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -409,25 +509,24 @@ class HomeActivity : Activity() {
         } catch (e: Exception) {
             null
         }
-        netPill.glyph = when {
+        netChip.glyph = when {
             info == null || !info.isConnected -> Glyphs.OFFLINE
             info.type == ConnectivityManager.TYPE_ETHERNET -> Glyphs.WIRED
             else -> Glyphs.WIFI
         }
-        netPill.text = if (info == null || !info.isConnected) "Offline" else ""
     }
 
     /** Re-render and put the highlight back on [key]. */
-    private fun refresh(key: String?, inFavorites: Boolean) {
+    private fun refresh(key: String?, inDock: Boolean) {
         focusKey = key
-        focusInFavorites = inFavorites
+        focusInDock = inDock
         render()
     }
 
     private fun moveFavorite(key: String, delta: Int) {
         val all = store.favorites.toMutableList()
         // Only items currently on screen count as neighbours.
-        val visible = (0 until favRow.childCount).map { (favRow.getChildAt(it) as TileView).key }
+        val visible = (0 until dock.childCount).map { (dock.getChildAt(it) as TileView).key }
         val at = visible.indexOf(key)
         if (at < 0) return
         val to = if (delta == Int.MIN_VALUE) 0 else (at + delta).coerceIn(0, visible.size - 1)
@@ -440,29 +539,33 @@ class HomeActivity : Activity() {
         refresh(key, true)
     }
 
-    private fun addFavoriteRows(d: GlassDialog, key: String, inFavorites: Boolean) {
+    private fun addFavoriteRows(d: GlassDialog, key: String, inDock: Boolean) {
         if (store.isFavorite(key)) {
-            if (inFavorites) {
+            if (inDock) {
                 d.row("Move left") { moveFavorite(key, -1) }
                 d.row("Move right") { moveFavorite(key, 1) }
                 d.row("Move to front") { moveFavorite(key, Int.MIN_VALUE) }
             }
-            d.row("Remove from Favorites") {
+            d.row("Remove from Dock") {
                 store.toggleFavorite(key)
                 refresh(key, false)
             }
         } else {
-            d.row("Add to Favorites") {
-                store.toggleFavorite(key)
-                refresh(key, false)
+            d.row("Add to Dock") {
+                if (dock.childCount >= MAX_DOCK) {
+                    toast("The dock is full. Remove something first.")
+                } else {
+                    store.toggleFavorite(key)
+                    refresh(key, true)
+                }
             }
         }
     }
 
-    private fun appMenu(app: AppEntry, inFavorites: Boolean) {
+    private fun appMenu(app: AppEntry, inDock: Boolean) {
         val d = GlassDialog(this, app.label, app.pkg)
         d.row("Open") { launch(app) }
-        addFavoriteRows(d, app.key, inFavorites)
+        addFavoriteRows(d, app.key, inDock)
         d.row("Hide from home") {
             store.hidden = store.hidden + app.key
             store.favorites = store.favorites - app.key
@@ -485,13 +588,18 @@ class HomeActivity : Activity() {
         d.show()
     }
 
-    private fun siteMenu(site: Site, inFavorites: Boolean) {
+    private fun siteMenu(site: Site, inDock: Boolean) {
         val d = GlassDialog(this, site.name, site.url)
-        d.row("Open") { openBrowser(site.url, site.tvMode) }
-        addFavoriteRows(d, site.key, inFavorites)
+        d.row("Open") { openSite(site) }
+        if (!store.preferBuiltInBrowser && externalBrowser() != null) {
+            d.row("Open with the pointer browser") { openBuiltIn(site.url, site.tvMode) }
+        }
+        addFavoriteRows(d, site.key, inDock)
         d.row("Edit") { editSite(site) }
         d.row("Remove", danger = true) {
             store.removeSite(site)
+            SiteIcons.forget(this, site)
+            siteArt.remove(site.id)
             refresh(null, false)
         }
         d.show()
@@ -505,7 +613,7 @@ class HomeActivity : Activity() {
         val url = d.input("Address, e.g. bbc.com", existing?.url ?: "", uri = true)
         val name = d.input("Name (optional)", existing?.name ?: "")
         var tv = existing?.tvMode ?: false
-        d.row({ if (tv) "Remote: arrow keys go to the page (TV sites)" else "Remote: moves an on-screen pointer" }, keepOpen = true) {
+        d.row({ if (tv) "Built-in browser: arrow keys go to the page" else "Built-in browser: on-screen pointer" }, keepOpen = true) {
             tv = !tv
         }
         d.row("Save") {
@@ -521,6 +629,8 @@ class HomeActivity : Activity() {
             val key = if (existing == null) {
                 store.addSite(title, address, tv).key
             } else {
+                if (existing.url != address) SiteIcons.forget(this, existing)
+                siteArt.remove(existing.id)
                 existing.name = title
                 existing.url = address
                 existing.tvMode = tv
@@ -528,6 +638,7 @@ class HomeActivity : Activity() {
                 existing.key
             }
             refresh(key, false)
+            fetchSiteIcons()
         }
         d.show()
     }
@@ -535,9 +646,16 @@ class HomeActivity : Activity() {
     private fun launcherMenu() {
         val d = GlassDialog(this, "Glass Home", "Hold OK on any tile for its options.")
         d.row("TV settings") { openSystemSettings() }
-        d.row({ "Wallpaper: ${Wallpapers.name(store.wallpaper)}" }, keepOpen = true) {
+        d.row({ "Backdrop: ${Wallpapers.name(store.wallpaper)}" }, keepOpen = true) {
             store.wallpaper = (store.wallpaper + 1) % Wallpapers.count
-            applyWallpaper()
+            applyWallpaper(animate = true)
+        }
+        val external = externalBrowser()
+        if (external != null) {
+            val name = browserName(external)
+            d.row({ "Websites open in: " + if (store.preferBuiltInBrowser) "built-in pointer browser" else name }, keepOpen = true) {
+                store.preferBuiltInBrowser = !store.preferBuiltInBrowser
+            }
         }
         val hiddenCount = store.hidden.size
         if (hiddenCount > 0) d.row("Hidden apps ($hiddenCount)") { hiddenMenu() }
@@ -561,5 +679,9 @@ class HomeActivity : Activity() {
             }
         }
         d.show()
+    }
+
+    companion object {
+        const val MAX_DOCK = 8
     }
 }

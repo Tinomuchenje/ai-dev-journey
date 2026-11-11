@@ -67,6 +67,11 @@ class Store(ctx: Context) {
         get() = sp.getBoolean("desktop", true)
         set(v) = sp.edit().putBoolean("desktop", v).apply()
 
+    /** True: websites open in the built-in pointer browser even if another browser is installed. */
+    var preferBuiltInBrowser: Boolean
+        get() = sp.getBoolean("builtInBrowser", false)
+        set(v) = sp.edit().putBoolean("builtInBrowser", v).apply()
+
     var seeded: Boolean
         get() = sp.getBoolean("seeded", false)
         set(v) = sp.edit().putBoolean("seeded", v).apply()

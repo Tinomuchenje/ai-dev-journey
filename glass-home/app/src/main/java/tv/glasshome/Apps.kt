@@ -11,8 +11,8 @@ import android.graphics.drawable.Drawable
 class AppEntry(
     val component: ComponentName,
     val label: String,
-    val icon: Bitmap?,
-    val banner: Bitmap?,
+    /** Ready-made 16:9 artwork: the app's own TV banner, or one built from its icon. */
+    val art: Bitmap?,
     val tint: Int,
     val leanback: Boolean,
 ) {
@@ -74,8 +74,11 @@ object Apps {
                 } catch (e: Exception) {
                     null
                 }?.let { rasterize(it, iconSize, iconSize) }
-                val tint = icon?.let { Tint.from(it) } ?: Tint.NEUTRAL
-                out += AppEntry(cn, label, icon, banner, tint, leanback)
+                val tint = (banner ?: icon)?.let { Tint.from(it) } ?: Tint.fromText(ai.packageName)
+                val art = banner
+                    ?: icon?.let { Art.tile(it, bannerW, bannerH) }
+                    ?: Art.monogram(label.take(1).uppercase(), tint, bannerW, bannerH)
+                out += AppEntry(cn, label, art, tint, leanback)
             }
         }
 

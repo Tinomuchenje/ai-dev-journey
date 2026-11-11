@@ -14,6 +14,8 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.PorterDuffColorFilter
+import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
@@ -63,22 +65,30 @@ fun withAlpha(color: Int, alpha: Float): Int =
     (color and 0x00FFFFFF) or ((alpha.coerceIn(0f, 1f) * 255).roundToInt() shl 24)
 
 object Fonts {
+    val thin: Typeface = Typeface.create("sans-serif-thin", Typeface.NORMAL)
     val light: Typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
     val regular: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
     val medium: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 }
 
-/** Soft white halo drawn behind a focused element. Rendered once per size and cached. */
-object Glow {
+/** Ink used for text and glyphs on a focused (white) control. */
+const val INK = 0xFF12141A.toInt()
+
+/**
+ * Soft blurred rounded rectangles used for drop shadows and coloured glows. Each size is
+ * rendered once in white and tinted when drawn.
+ */
+object Shadow {
     private val cache = HashMap<String, Bitmap>()
+    private val filters = HashMap<Int, PorterDuffColorFilter>()
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
 
-    fun pad(): Int = ceil(uf(20f) * 2.2f).toInt()
+    private fun pad(blur: Float): Int = ceil(blur * 2.4f).toInt()
 
-    fun get(w: Int, h: Int, radius: Float): Bitmap {
-        val key = "$w:$h:${radius.roundToInt()}:${Dim.unit}"
+    private fun get(w: Int, h: Int, radius: Float, blur: Float, punched: Boolean): Bitmap {
+        val key = "$w:$h:${radius.roundToInt()}:${blur.roundToInt()}:$punched"
         cache[key]?.let { return it }
-        val blur = uf(20f)
-        val pad = pad()
+        val pad = pad(blur)
         val bmp = Bitmap.createBitmap(w + pad * 2, h + pad * 2, Bitmap.Config.ARGB_8888)
         bmp.density = Bitmap.DENSITY_NONE // drawn 1:1 in pixels, never density-scaled
         val c = Canvas(bmp)
@@ -87,28 +97,42 @@ object Glow {
         p.color = Color.WHITE
         p.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
         c.drawRoundRect(rect, radius, radius, p)
-        // Punch out the middle so the halo never washes out the glass itself.
-        p.maskFilter = null
-        p.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-        rect.inset(1f, 1f)
-        c.drawRoundRect(rect, radius, radius, p)
+        if (punched) {
+            // For see-through glass: keep the shadow around the shape, not behind it.
+            p.maskFilter = null
+            p.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+            rect.inset(1f, 1f)
+            c.drawRoundRect(rect, radius, radius, p)
+        }
         cache[key] = bmp
         return bmp
+    }
+
+    fun draw(
+        c: Canvas, left: Float, top: Float, w: Int, h: Int, radius: Float,
+        blur: Float, color: Int, alpha: Float, dy: Float = 0f, punched: Boolean = false,
+    ) {
+        if (alpha <= 0.004f || w <= 0 || h <= 0) return
+        val pad = pad(blur)
+        val rgb = color or 0xFF000000.toInt()
+        paint.colorFilter = filters.getOrPut(rgb) { PorterDuffColorFilter(rgb, PorterDuff.Mode.SRC_IN) }
+        paint.alpha = (alpha.coerceIn(0f, 1f) * 255).roundToInt()
+        c.drawBitmap(get(w, h, radius, blur, punched), left - pad, top - pad + dy, paint)
     }
 }
 
 /**
- * A pane of "glass": translucent body, a soft highlight falling from the top edge and a
- * bright rim that fades toward the bottom-right. No live blur - the wallpaper behind it
- * is already soft, which gives the frosted look for free on a weak GPU.
+ * A pane of "liquid glass": a faint translucent body, a soft sheen falling from the top
+ * edge, and a rim that catches light at the top-left and bottom-right corners. There is
+ * no live blur - the backdrop behind it is already soft, which gives the frosted look
+ * for free on a weak GPU. Focused glass turns bright white, the way tvOS controls do.
  */
 class GlassDrawable(
     private val radius: Float,
     private val bodyTop: Int,
     private val bodyBottom: Int,
-    private val rimIdle: Float = 0.26f,
-    private val rimFocus: Float = 0.95f,
-    private val focusBody: Int = 0x38FFFFFF,
+    private val rimAlpha: Float,
+    private val focusFill: Int = 0,
 ) : Drawable() {
 
     var focus = 0f
@@ -128,28 +152,27 @@ class GlassDrawable(
         val bt = b.bottom.toFloat()
         body.shader = LinearGradient(0f, t, 0f, bt, bodyTop, bodyBottom, Shader.TileMode.CLAMP)
         sheen.shader = LinearGradient(
-            0f, t, 0f, t + b.height() * 0.6f,
-            0x2EFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP
+            0f, t, 0f, t + b.height() * 0.5f, 0x1FFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP
         )
         rim.shader = LinearGradient(
             b.left.toFloat(), t, b.right.toFloat(), bt,
-            intArrayOf(Color.WHITE, 0x66FFFFFF, 0xB3FFFFFF.toInt()),
-            floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP
+            intArrayOf(Color.WHITE, 0x24FFFFFF, 0x1AFFFFFF, 0x8CFFFFFF.toInt()),
+            floatArrayOf(0f, 0.3f, 0.7f, 1f), Shader.TileMode.CLAMP
         )
     }
 
     override fun draw(c: Canvas) {
         rect.set(bounds)
         c.drawRoundRect(rect, radius, radius, body)
-        if (focus > 0f) {
-            lit.color = focusBody
-            lit.alpha = (Color.alpha(focusBody) * focus).roundToInt()
+        if (focus > 0f && focusFill != 0) {
+            lit.color = focusFill
+            lit.alpha = (Color.alpha(focusFill) * focus).roundToInt()
             c.drawRoundRect(rect, radius, radius, lit)
         }
         c.drawRoundRect(rect, radius, radius, sheen)
-        val sw = lerp(uf(1.5f), uf(3f), focus)
+        val sw = uf(1.6f)
         rim.strokeWidth = sw
-        rim.alpha = (lerp(rimIdle, rimFocus, focus) * 255).roundToInt()
+        rim.alpha = (rimAlpha * 255).roundToInt()
         rect.inset(sw / 2f, sw / 2f)
         c.drawRoundRect(rect, radius - sw / 2f, radius - sw / 2f, rim)
     }
@@ -161,18 +184,27 @@ class GlassDrawable(
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 
     companion object {
+        /** The dock that holds the favourites. */
+        fun tray(radius: Float) = GlassDrawable(radius, 0x24FFFFFF, 0x10FFFFFF, 0.6f)
+
+        /** Round buttons in the top corner. */
+        fun chip(radius: Float) = GlassDrawable(radius, 0x2BFFFFFF, 0x14FFFFFF, 0.6f, 0xF5FFFFFF.toInt())
+
+        /** Neutral tile, e.g. "Add website". */
+        fun tile(radius: Float) = GlassDrawable(radius, 0x26FFFFFF, 0x10FFFFFF, 0.55f, 0x33FFFFFF)
+
         /**
          * Darker pane for menus where text must stay readable. Where the OS can blur what is
          * behind it (Android 12+) it stays see-through; otherwise it goes nearly solid.
          */
         fun panel(radius: Float) = if (Build.VERSION.SDK_INT >= 31) {
-            GlassDrawable(radius, 0xD01B2136.toInt(), 0xE0101424.toInt(), 0.4f, 0.4f)
+            GlassDrawable(radius, 0xB82A2F3F.toInt(), 0xCC161821.toInt(), 0.55f)
         } else {
-            GlassDrawable(radius, 0xF51B2136.toInt(), 0xFA101424.toInt(), 0.4f, 0.4f)
+            GlassDrawable(radius, 0xF5262A38.toInt(), 0xFA14161F.toInt(), 0.5f)
         }
 
-        /** Menu row / text field. */
-        fun row(radius: Float) = GlassDrawable(radius, 0x14FFFFFF, 0x0DFFFFFF, 0.14f, 0.9f, 0x40FFFFFF)
+        /** Menu row / text field: turns white when focused. */
+        fun row(radius: Float) = GlassDrawable(radius, 0x14FFFFFF, 0x0CFFFFFF, 0.22f, 0xF5FFFFFF.toInt())
     }
 }
 
@@ -275,9 +307,13 @@ object Glyphs {
 }
 
 object Tint {
-    const val NEUTRAL = 0
+    /** Used when nothing better is known. */
+    const val DEFAULT = 0xFF3E5C9A.toInt()
 
-    /** A saturated-leaning average of an icon, used to give each tile its own glass colour. */
+    /**
+     * The colour an icon "feels like": an average that leans toward its saturated pixels.
+     * Black, white and grey icons give a matching neutral instead of a made-up hue.
+     */
     fun from(bmp: Bitmap): Int {
         val s = Bitmap.createScaledBitmap(bmp, 24, 24, true)
         val px = IntArray(24 * 24)
@@ -288,20 +324,27 @@ object Tint {
         var g = 0f
         var b = 0f
         var sum = 0f
+        var luma = 0f
+        var count = 0
         for (p in px) {
             if (Color.alpha(p) < 128) continue
             Color.colorToHSV(p, hsv)
-            val w = 0.04f + hsv[1] * hsv[1] * hsv[2]
+            val w = 0.02f + hsv[1] * hsv[1] * hsv[2]
             r += Color.red(p) * w
             g += Color.green(p) * w
             b += Color.blue(p) * w
             sum += w
+            luma += (0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p)) / 255f
+            count++
         }
-        if (sum <= 0f) return NEUTRAL
+        if (count == 0) return DEFAULT
         Color.colorToHSV(Color.rgb((r / sum).toInt(), (g / sum).toInt(), (b / sum).toInt()), hsv)
-        if (hsv[1] < 0.12f) return NEUTRAL
-        hsv[1] = (hsv[1] * 1.1f).coerceIn(0.35f, 0.8f)
-        hsv[2] = hsv[2].coerceIn(0.42f, 0.74f)
+        if (hsv[1] < 0.18f) {
+            val v = (luma / count).coerceIn(0.16f, 0.8f)
+            return Color.HSVToColor(floatArrayOf(225f, 0.08f, v))
+        }
+        hsv[1] = (hsv[1] * 1.1f).coerceIn(0.4f, 0.85f)
+        hsv[2] = hsv[2].coerceIn(0.45f, 0.8f)
         return Color.HSVToColor(hsv)
     }
 
@@ -310,7 +353,7 @@ object Tint {
         var hsh = 7
         for (ch in text) hsh = hsh * 31 + ch.code
         val hue = ((hsh % 360) + 360) % 360
-        return Color.HSVToColor(floatArrayOf(hue.toFloat(), 0.62f, 0.66f))
+        return Color.HSVToColor(floatArrayOf(hue.toFloat(), 0.6f, 0.62f))
     }
 
     fun shade(color: Int, factor: Float): Int = Color.rgb(
@@ -318,4 +361,124 @@ object Tint {
         (Color.green(color) * factor).toInt().coerceIn(0, 255),
         (Color.blue(color) * factor).toInt().coerceIn(0, 255),
     )
+
+    /** A lively version of [color] for glows, whatever its original brightness. */
+    fun glow(color: Int): Int {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(color, hsv)
+        if (hsv[1] < 0.15f) return 0xFFDCE4FF.toInt()
+        hsv[1] = hsv[1].coerceIn(0.5f, 0.8f)
+        hsv[2] = 1f
+        return Color.HSVToColor(hsv)
+    }
+}
+
+/** Builds the 16:9 artwork for things that only come with a square icon. */
+object Art {
+    private val smooth = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+    /**
+     * A phone-style icon becomes a TV-style tile: the icon itself, hugely enlarged and
+     * blurred, forms a rich backdrop in the app's own colours, and the sharp icon floats
+     * on top of it with a soft shadow.
+     */
+    fun tile(icon: Bitmap, w: Int, h: Int, iconScale: Float = 0.62f): Bitmap {
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.density = Bitmap.DENSITY_NONE
+        val c = Canvas(out)
+
+        // Backdrop: the icon blown up past the tile, shrunk to a few pixels, then smoothed.
+        val sw = 32
+        val sh = 18
+        val small = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+        val sc = Canvas(small)
+        sc.drawColor(from(icon))
+        val iw = sw * 2.3f // far past the edges, so only the heart of the icon colours the tile
+        sc.drawBitmap(icon, null, RectF((sw - iw) / 2, (sh - iw) / 2, (sw + iw) / 2, (sh + iw) / 2), smooth)
+        val px = IntArray(sw * sh)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        repeat(3) { boxBlur(px, sw, sh) }
+        small.setPixels(px, 0, sw, 0, 0, sw, sh)
+        val rich = Paint(Paint.FILTER_BITMAP_FLAG)
+        val cm = android.graphics.ColorMatrix()
+        cm.setSaturation(1.3f)
+        val dim = android.graphics.ColorMatrix()
+        dim.setScale(0.8f, 0.8f, 0.8f, 1f)
+        cm.postConcat(dim)
+        rich.colorFilter = android.graphics.ColorMatrixColorFilter(cm)
+        c.drawBitmap(small, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), rich)
+        small.recycle()
+        finish(c, w, h)
+
+        // The icon, floating.
+        val s = (h * iconScale).roundToInt()
+        val scaled = Bitmap.createScaledBitmap(icon, s, s, true)
+        val left = (w - s) / 2f
+        val top = (h - s) / 2f
+        val blur = Paint()
+        blur.maskFilter = BlurMaskFilter(h * 0.07f, BlurMaskFilter.Blur.NORMAL)
+        val off = IntArray(2)
+        val alpha = scaled.extractAlpha(blur, off)
+        val sp = Paint()
+        sp.color = 0x73000000
+        c.drawBitmap(alpha, left + off[0], top + off[1] + h * 0.045f, sp)
+        alpha.recycle()
+        c.drawBitmap(scaled, left, top, smooth)
+        if (scaled !== icon) scaled.recycle()
+        return out
+    }
+
+    /** Artwork for a website with no usable icon: its initial, set large and light. */
+    fun monogram(letter: String, color: Int, w: Int, h: Int): Bitmap {
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.density = Bitmap.DENSITY_NONE
+        val c = Canvas(out)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = LinearGradient(
+            0f, 0f, w.toFloat(), h.toFloat(), Tint.shade(color, 1.15f), Tint.shade(color, 0.6f), Shader.TileMode.CLAMP
+        )
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        finish(c, w, h)
+        p.shader = null
+        p.color = Color.WHITE
+        p.typeface = Fonts.light
+        p.textAlign = Paint.Align.CENTER
+        p.textSize = h * 0.5f
+        p.setShadowLayer(h * 0.05f, 0f, h * 0.02f, 0x55000000)
+        c.drawText(letter, w / 2f, h / 2f - (p.ascent() + p.descent()) / 2f, p)
+        return out
+    }
+
+    /** Shared lighting: darker toward the bottom-right, a soft highlight from the top-left. */
+    private fun finish(c: Canvas, w: Int, h: Int) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = LinearGradient(0f, 0f, w.toFloat(), h.toFloat(), 0x00000000, 0x61000000, Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        p.shader = RadialGradient(w * 0.18f, 0f, w * 0.85f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+    }
+
+    private fun from(icon: Bitmap) = Tint.shade(Tint.from(icon), 0.9f)
+
+    private fun boxBlur(px: IntArray, w: Int, h: Int) {
+        val src = px.copyOf()
+        for (y in 0 until h) for (x in 0 until w) {
+            var a = 0
+            var r = 0
+            var g = 0
+            var b = 0
+            var n = 0
+            for (dy in -2..2) for (dx in -2..2) {
+                val xx = (x + dx).coerceIn(0, w - 1)
+                val yy = (y + dy).coerceIn(0, h - 1)
+                val p = src[yy * w + xx]
+                a += p ushr 24
+                r += (p shr 16) and 0xFF
+                g += (p shr 8) and 0xFF
+                b += p and 0xFF
+                n++
+            }
+            px[y * w + x] = ((a / n) shl 24) or ((r / n) shl 16) or ((g / n) shl 8) or (b / n)
+        }
+    }
 }

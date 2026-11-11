@@ -39,11 +39,11 @@ class GlassDialog(
 
         val panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = GlassDrawable.panel(uf(40f))
-            setPadding(u(36), u(34), u(36), u(30))
+            background = GlassDrawable.panel(uf(48f))
+            setPadding(u(40), u(40), u(40), u(36))
             isClickable = true
         }
-        panel.addView(text(title, 34f, 1f).apply {
+        panel.addView(text(title, 38f, 1f).apply {
             typeface = Fonts.medium
             setPadding(u(12), 0, u(12), 0)
         })
@@ -52,7 +52,9 @@ class GlassDialog(
         }
         rows = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, u(18), 0, 0)
+            clipChildren = false
+            clipToPadding = false
+            setPadding(u(8), u(18), u(8), u(6))
         }
         val scroller = object : ScrollView(context) {
             override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -61,10 +63,12 @@ class GlassDialog(
             }
         }
         scroller.isVerticalScrollBarEnabled = false
+        scroller.clipChildren = false
+        scroller.clipToPadding = false
         scroller.addView(rows, MATCH_PARENT, WRAP_CONTENT)
         panel.addView(scroller, MATCH_PARENT, WRAP_CONTENT)
 
-        root.addView(panel, FrameLayout.LayoutParams(u(720), WRAP_CONTENT, Gravity.CENTER))
+        root.addView(panel, FrameLayout.LayoutParams(u(760), WRAP_CONTENT, Gravity.CENTER))
         setContentView(root)
         window?.setLayout(MATCH_PARENT, MATCH_PARENT)
     }
@@ -89,18 +93,25 @@ class GlassDialog(
      * setting can stay open ([keepOpen]) and show the new value.
      */
     fun row(label: () -> String, keepOpen: Boolean = false, danger: Boolean = false, action: () -> Unit): GlassDialog {
-        val bg = GlassDrawable.row(uf(22f))
+        val bg = GlassDrawable.row(uf(24f))
+        val idle = if (danger) 0xFFFF8A8A.toInt() else Color.WHITE
+        val lit = if (danger) 0xFFB3261E.toInt() else INK
         val tv = text(label(), 28f, 1f).apply {
+            typeface = Fonts.medium
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(u(28), 0, u(28), 0)
+            setPadding(u(30), 0, u(30), 0)
             background = bg
             isFocusable = true
             isFocusableInTouchMode = true
             isClickable = true
             isSingleLine = true
+            setTextColor(idle)
             if (Build.VERSION.SDK_INT >= 26) defaultFocusHighlightEnabled = false
-            if (danger) setTextColor(0xFFFF8A8A.toInt())
-            setOnFocusChangeListener { _, has -> bg.focus = if (has) 1f else 0f }
+            setOnFocusChangeListener { v, has ->
+                bg.focus = if (has) 1f else 0f
+                (v as TextView).setTextColor(if (has) lit else idle)
+                v.animate().scaleX(if (has) 1.025f else 1f).scaleY(if (has) 1.025f else 1f).setDuration(140).start()
+            }
             setOnHoverListener { v, e ->
                 if (e.action == android.view.MotionEvent.ACTION_HOVER_ENTER) v.requestFocus()
                 false
@@ -120,7 +131,7 @@ class GlassDialog(
 
     /** Adds a text field. OK on the remote opens the on-screen keyboard. */
     fun input(hint: String, value: String, uri: Boolean = false): EditText {
-        val bg = GlassDrawable.row(uf(22f))
+        val bg = GlassDrawable.row(uf(24f))
         val et = EditText(context).apply {
             setText(value)
             this.hint = hint
@@ -129,7 +140,7 @@ class GlassDialog(
             setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(28f))
             typeface = Fonts.regular
             background = bg
-            setPadding(u(28), 0, u(28), 0)
+            setPadding(u(30), 0, u(30), 0)
             gravity = Gravity.CENTER_VERTICAL
             isSingleLine = true
             imeOptions = EditorInfo.IME_ACTION_NEXT or EditorInfo.IME_FLAG_NO_EXTRACT_UI
@@ -137,7 +148,11 @@ class GlassDialog(
                 (if (uri) InputType.TYPE_TEXT_VARIATION_URI else InputType.TYPE_TEXT_FLAG_CAP_WORDS)
             setSelectAllOnFocus(true)
             if (Build.VERSION.SDK_INT >= 26) defaultFocusHighlightEnabled = false
-            setOnFocusChangeListener { _, has -> bg.focus = if (has) 1f else 0f }
+            setOnFocusChangeListener { v, has ->
+                bg.focus = if (has) 1f else 0f
+                (v as EditText).setTextColor(if (has) INK else Color.WHITE)
+                v.setHintTextColor(if (has) withAlpha(INK, 0.5f) else withAlpha(Color.WHITE, 0.45f))
+            }
         }
         addRow(et, u(78))
         return et

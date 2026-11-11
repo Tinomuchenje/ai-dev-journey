@@ -6,17 +6,20 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.net.Uri
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.TextView
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -49,37 +52,99 @@ class HomeScreenTest {
 
     private val ctx: Context get() = RuntimeEnvironment.getApplication()
 
-    private class FakeApp(val pkg: String, val label: String, val color: Int)
+    /** A stand-in app: a name and a rough sketch of the kind of icon it would ship. */
+    private class FakeApp(val pkg: String, val label: String, val bg: Int, val draw: (Canvas, Paint) -> Unit)
+
+    private fun c(hex: Long) = hex.toInt()
+
+    private fun letter(text: String, color: Int, size: Float = 120f): (Canvas, Paint) -> Unit = { cv, p ->
+        p.color = color
+        p.textSize = size
+        p.textAlign = Paint.Align.CENTER
+        p.isFakeBoldText = true
+        cv.drawText(text, 96f, 96f - (p.ascent() + p.descent()) / 2f, p)
+    }
+
+    private fun play(plate: Int, arrow: Int): (Canvas, Paint) -> Unit = { cv, p ->
+        p.color = plate
+        cv.drawRoundRect(RectF(30f, 54f, 162f, 138f), 26f, 26f, p)
+        p.color = arrow
+        cv.drawPath(Path().apply { moveTo(80f, 74f); lineTo(122f, 96f); lineTo(80f, 118f); close() }, p)
+    }
 
     private val installed = listOf(
-        FakeApp("com.netflix.mediaclient", "Netflix", 0xFFE50914.toInt()),
-        FakeApp("com.google.android.youtube", "YouTube", 0xFFFF0000.toInt()),
-        FakeApp("com.amazon.avod.thirdpartyclient", "Prime Video", 0xFF00A8E1.toInt()),
-        FakeApp("org.videolan.vlc", "VLC", 0xFFFF8800.toInt()),
-        FakeApp("com.spotify.music", "Spotify", 0xFF1DB954.toInt()),
-        FakeApp("com.android.settings", "Settings", 0xFF8A93A6.toInt()),
-        FakeApp("com.vendor.filemanager", "File Manager", 0xFFF2B01E.toInt()),
-        FakeApp("com.vendor.appstore", "App Store", 0xFFE83E6C.toInt()),
-        FakeApp("com.vendor.media", "Media Player", 0xFF7C6CF2.toInt()),
-        FakeApp("com.facebook.katana", "Facebook", 0xFF1877F2.toInt()),
-        FakeApp("com.twitter.android", "Twitter", 0xFF1DA1F2.toInt()),
-        FakeApp("com.zhiliaoapp.musically", "TikTok", 0xFF111111.toInt()),
-        FakeApp("com.vendor.cleaner", "TV Cleaner With A Very Long Name", 0xFF2FB6A0.toInt()),
-        FakeApp("com.vendor.browser", "Browser", 0xFFFFFFFF.toInt()),
+        FakeApp("com.netflix.mediaclient", "Netflix", c(0xFF0B0B0B), letter("N", c(0xFFE50914), 150f)),
+        FakeApp("com.google.android.youtube", "YouTube", c(0xFFFFFFFF), play(c(0xFFFF0033), Color.WHITE)),
+        FakeApp("com.amazon.avod.thirdpartyclient", "Prime Video", c(0xFF0F79AF)) { cv, p ->
+            p.color = Color.WHITE
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = 14f
+            p.strokeCap = Paint.Cap.ROUND
+            cv.drawArc(RectF(40f, 30f, 152f, 130f), 30f, 120f, false, p)
+            p.style = Paint.Style.FILL
+        },
+        FakeApp("org.videolan.vlc", "VLC", c(0xFFF6F6F6)) { cv, p ->
+            p.color = c(0xFFFF8800)
+            cv.drawPath(Path().apply { moveTo(96f, 30f); lineTo(146f, 150f); lineTo(46f, 150f); close() }, p)
+            p.color = Color.WHITE
+            cv.drawRect(60f, 96f, 132f, 112f, p)
+        },
+        FakeApp("com.spotify.music", "Spotify", c(0xFF121212)) { cv, p ->
+            p.color = c(0xFF1ED760)
+            cv.drawCircle(96f, 96f, 62f, p)
+            p.color = c(0xFF121212)
+            p.style = Paint.Style.STROKE
+            p.strokeCap = Paint.Cap.ROUND
+            for ((i, y) in listOf(70f, 94f, 116f).withIndex()) {
+                p.strokeWidth = 12f - i * 2
+                cv.drawArc(RectF(52f + i * 6, y, 140f - i * 6, y + 44f), 205f, 130f, false, p)
+            }
+            p.style = Paint.Style.FILL
+        },
+        FakeApp("com.android.settings", "Settings", c(0xFF8E96A8)) { cv, p ->
+            p.color = Color.WHITE
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = 20f
+            cv.drawCircle(96f, 96f, 40f, p)
+            p.style = Paint.Style.FILL
+        },
+        FakeApp("com.vendor.filemanager", "File Manager", c(0xFFFFC53D)) { cv, p ->
+            p.color = Color.WHITE
+            cv.drawRoundRect(RectF(40f, 62f, 152f, 140f), 12f, 12f, p)
+            cv.drawRoundRect(RectF(40f, 48f, 100f, 80f), 10f, 10f, p)
+        },
+        FakeApp("com.vendor.appstore", "App Store", c(0xFFF0456F), letter("A", Color.WHITE)),
+        FakeApp("com.vendor.media", "Media Player", c(0xFF6D5BF0), play(c(0x00000000), Color.WHITE)),
+        FakeApp("com.facebook.katana", "Facebook", c(0xFF1877F2), letter("f", Color.WHITE, 150f)),
+        FakeApp("com.twitter.android", "Twitter", c(0xFF000000), letter("X", Color.WHITE)),
+        FakeApp("com.zhiliaoapp.musically", "TikTok", c(0xFF010101), letter("♪", c(0xFF25F4EE))),
+        FakeApp("com.vendor.cleaner", "TV Cleaner With A Very Long Name", c(0xFF19B394), letter("✦", Color.WHITE)),
+        FakeApp("com.vendor.browser", "Browser", c(0xFFFDFDFD)) { cv, p ->
+            p.color = c(0xFF2F6BFF)
+            cv.drawCircle(96f, 96f, 58f, p)
+            p.color = Color.WHITE
+            cv.drawPath(Path().apply { moveTo(96f, 52f); lineTo(116f, 96f); lineTo(96f, 140f); lineTo(76f, 96f); close() }, p)
+        },
     )
 
     private fun iconFor(app: FakeApp): Drawable {
         val bmp = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888)
-        val c = Canvas(bmp)
+        val cv = Canvas(bmp)
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
-        p.color = app.color
-        c.drawRoundRect(RectF(8f, 8f, 184f, 184f), 44f, 44f, p)
-        p.color = if (app.color == Color.WHITE) 0xFF3366FF.toInt() else Color.WHITE
-        p.textSize = 110f
-        p.textAlign = Paint.Align.CENTER
-        p.isFakeBoldText = true
-        c.drawText(app.label.take(1), 96f, 134f, p)
+        p.color = app.bg
+        cv.drawRoundRect(RectF(6f, 6f, 186f, 186f), 44f, 44f, p)
+        app.draw(cv, Paint(Paint.ANTI_ALIAS_FLAG))
         return BitmapDrawable(ctx.resources, bmp)
+    }
+
+    private fun resolveInfo(pkg: String, label: String, iconId: Int = 0) = ResolveInfo().apply {
+        nonLocalizedLabel = label
+        activityInfo = ActivityInfo().apply {
+            icon = iconId
+            packageName = pkg
+            name = "$pkg.Main"
+            applicationInfo = ApplicationInfo().apply { packageName = pkg }
+        }
     }
 
     @Before
@@ -88,15 +153,7 @@ class HomeScreenTest {
         val infos = installed.mapIndexed { index, app ->
             val iconId = 0x7f990000 + index
             pm.addDrawableResolution(app.pkg, iconId, iconFor(app))
-            ResolveInfo().apply {
-                nonLocalizedLabel = app.label
-                activityInfo = ActivityInfo().apply {
-                    icon = iconId
-                    packageName = app.pkg
-                    name = app.pkg + ".Main"
-                    applicationInfo = ApplicationInfo().apply { packageName = app.pkg }
-                }
-            }
+            resolveInfo(app.pkg, app.label, iconId)
         }
         @Suppress("DEPRECATION")
         pm.addResolveInfoForIntent(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), infos)
@@ -108,8 +165,8 @@ class HomeScreenTest {
     private fun settle() {
         // App loading hops through a background thread; animations and smooth scrolling
         // advance only as frames are drawn, so draw a second's worth of them.
-        repeat(10) {
-            Thread.sleep(15)
+        repeat(12) {
+            Thread.sleep(20)
             ShadowLooper.idleMainLooper()
         }
         repeat(60) {
@@ -127,61 +184,57 @@ class HomeScreenTest {
         return activity
     }
 
-    private fun tiles(root: View): List<TileView> {
-        val out = ArrayList<TileView>()
+    private fun views(root: View): List<View> {
+        val out = ArrayList<View>()
         fun walk(v: View) {
-            if (v is TileView) out += v
+            out += v
             if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
         }
         walk(root)
         return out
     }
 
+    private inline fun <reified T : View> all(root: View): List<T> = views(root).filterIsInstance<T>()
+
+    private fun tiles(root: View) = all<TileView>(root)
+
     private fun focus(a: Activity) = a.window.decorView.findFocus() as TileView
 
     private fun content(a: Activity): View = a.findViewById(android.R.id.content)
 
-    private fun shoot(view: View, name: String, background: Drawable? = null) {
-        val bmp = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-        val c = Canvas(bmp)
-        background?.let {
-            it.setBounds(0, 0, view.width, view.height)
-            it.draw(c)
-        }
-        view.draw(c)
+    private fun save(bmp: Bitmap, name: String) {
         val dir = File("build/screenshots").apply { mkdirs() }
         FileOutputStream(File(dir, "$name.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
     private fun shootHome(a: HomeActivity, name: String) {
-        shoot(a.window.decorView, name, BitmapDrawable(a.resources, Wallpapers.make(Store(a).wallpaper)))
+        val view = a.window.decorView
+        val bmp = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+        view.draw(Canvas(bmp))
+        save(bmp, name)
     }
 
-    /** The dialog composited over the dimmed home screen, the way it appears on the TV. */
+    /**
+     * The dialog composited over the home screen the way it appears on the TV: dimmed and,
+     * on Android 12+, blurred. The blur is done by the GPU on a real device, which this
+     * JVM renderer cannot do, so it is approximated here by repeatedly halving and doubling the image.
+     */
     private fun shootDialog(a: HomeActivity, name: String) {
         val home = a.window.decorView
+        val sharp = Bitmap.createBitmap(home.width, home.height, Bitmap.Config.ARGB_8888)
+        home.draw(Canvas(sharp))
+        var soft = sharp
+        repeat(4) { soft = Bitmap.createScaledBitmap(soft, soft.width / 2, soft.height / 2, true) }
+        repeat(3) { soft = Bitmap.createScaledBitmap(soft, soft.width * 2, soft.height * 2, true) }
         val bmp = Bitmap.createBitmap(home.width, home.height, Bitmap.Config.ARGB_8888)
-        val c = Canvas(bmp)
-        BitmapDrawable(a.resources, Wallpapers.make(Store(a).wallpaper)).apply {
-            setBounds(0, 0, home.width, home.height)
-            draw(c)
-        }
-        home.draw(c)
-        c.drawColor(0x8C000000.toInt())
-        ShadowDialog.getLatestDialog().window!!.decorView.draw(c)
-        val dir = File("build/screenshots").apply { mkdirs() }
-        FileOutputStream(File(dir, "$name.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        val cv = Canvas(bmp)
+        cv.drawBitmap(soft, null, RectF(0f, 0f, home.width.toFloat(), home.height.toFloat()), Paint(Paint.FILTER_BITMAP_FLAG))
+        cv.drawColor(0x8C000000.toInt())
+        ShadowDialog.getLatestDialog().window!!.decorView.draw(cv)
+        save(bmp, name)
     }
 
-    private fun dialogRows(d: Dialog): List<TextView> {
-        val out = ArrayList<TextView>()
-        fun walk(v: View) {
-            if (v is TextView && v.isClickable) out += v
-            if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
-        }
-        walk(d.window!!.decorView)
-        return out
-    }
+    private fun dialogRows(d: Dialog) = all<TextView>(d.window!!.decorView).filter { it.isClickable && it !is EditText }
 
     private fun pressRow(text: String) {
         val d = ShadowDialog.getLatestDialog()
@@ -191,8 +244,13 @@ class HomeScreenTest {
         settle()
     }
 
+    private fun holdOk(tile: TileView) {
+        tile.performLongClick()
+        settle()
+    }
+
     @Test
-    fun firstRunPinsStreamingAppsAndFocusesTheFirstOne() {
+    fun firstRunFillsTheDockWithStreamingAppsAndFocusesTheFirstOne() {
         val a = launch()
         val store = Store(a)
         assertEquals(
@@ -200,8 +258,8 @@ class HomeScreenTest {
             store.favorites.map { key -> tiles(content(a)).first { it.key == key }.label }
         )
         assertEquals(listOf("YouTube TV", "Google"), store.sites.map { it.name })
-        val focused = focus(a)
-        assertEquals("Netflix", focused.label)
+        assertEquals("Netflix", focus(a).label)
+        assertTrue("first tile sits in the dock", focus(a).parent is DockLayout)
         shootHome(a, "home")
     }
 
@@ -216,19 +274,17 @@ class HomeScreenTest {
     @Test
     fun hidingAnAppRemovesItEverywhereAndItCanBeRestored() {
         val a = launch()
-        tiles(content(a)).first { it.label == "Facebook" }.performLongClick()
+        val facebook = tiles(content(a)).first { it.label == "Facebook" }
+        facebook.requestFocus()
         settle()
+        holdOk(facebook)
         shootDialog(a, "menu")
         pressRow("Hide from home")
         assertFalse(tiles(content(a)).any { it.label == "Facebook" })
         assertEquals(1, Store(a).hidden.size)
 
-        // Settings pill -> Hidden apps -> Facebook brings it back.
-        a.onKeyUp(android.view.KeyEvent.KEYCODE_MENU, android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_MENU))
-        settle()
-        ShadowDialog.getLatestDialog().dismiss()
-        val settingsPill = pills(content(a)).first { it.text == "Settings" }
-        settingsPill.performClick()
+        // Settings button -> Hidden apps -> Facebook brings it back.
+        all<ChipView>(content(a)).first { it.contentDescription == "Settings" }.performClick()
         settle()
         pressRow("Hidden apps")
         pressRow("Facebook")
@@ -236,60 +292,70 @@ class HomeScreenTest {
         assertTrue(Store(a).hidden.isEmpty())
     }
 
-    private fun pills(root: View): List<PillView> {
-        val out = ArrayList<PillView>()
-        fun walk(v: View) {
-            if (v is PillView) out += v
-            if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
-        }
-        walk(root)
-        return out
+    @Test
+    fun menuKeyOpensTheOptionsOfTheFocusedTile() {
+        val a = launch()
+        a.onKeyUp(KeyEvent.KEYCODE_MENU, KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MENU))
+        settle()
+        assertTrue(dialogRows(ShadowDialog.getLatestDialog()).any { it.text.toString() == "Remove from Dock" })
     }
 
     @Test
-    fun favoritesCanBeAddedReorderedAndRemoved() {
+    fun dockItemsCanBeAddedReorderedAndRemoved() {
         val a = launch()
         val store = Store(a)
         val before = store.favorites
 
-        tiles(content(a)).first { it.label == "Settings" }.performLongClick()
-        settle()
-        pressRow("Add to Favorites")
+        holdOk(tiles(content(a)).first { it.label == "Settings" })
+        pressRow("Add to Dock")
         val settingsKey = store.favorites.last()
         assertEquals(before + settingsKey, store.favorites)
+        assertTrue("highlight follows it into the dock", focus(a).key == settingsKey && focus(a).parent is DockLayout)
 
-        // Its copy in the Favorites strip can be moved to the front...
-        tiles(content(a)).first { it.key == settingsKey }.performLongClick()
-        settle()
+        holdOk(focus(a))
         pressRow("Move to front")
         assertEquals(listOf(settingsKey) + before, store.favorites)
         assertEquals("highlight follows the moved tile", settingsKey, focus(a).key)
 
-        // ...one step right...
-        focus(a).performLongClick()
-        settle()
+        holdOk(focus(a))
         pressRow("Move right")
         assertEquals(listOf(before[0], settingsKey) + before.drop(1), store.favorites)
 
-        // ...and unpinned again.
-        focus(a).performLongClick()
-        settle()
-        pressRow("Remove from Favorites")
+        holdOk(focus(a))
+        pressRow("Remove from Dock")
         assertEquals(before, store.favorites)
+    }
+
+    @Test
+    fun dockTilesShrinkToFitInsteadOfRunningOffTheScreen() {
+        val a = launch()
+        for (name in listOf("Settings", "Facebook", "Browser")) {
+            holdOk(tiles(content(a)).first { it.label == name && it.parent !is DockLayout })
+            pressRow("Add to Dock")
+        }
+        val dock = all<DockLayout>(content(a)).single()
+        assertEquals(8, dock.childCount)
+        val loc = IntArray(2)
+        dock.getLocationOnScreen(loc)
+        assertTrue("dock fits the screen", loc[0] >= 0 && loc[0] + dock.width <= Dim.w)
+        shootHome(a, "dock-full")
+
+        // A ninth item is refused rather than squeezed in.
+        holdOk(tiles(content(a)).first { it.label == "TikTok" })
+        pressRow("Add to Dock")
+        assertEquals(8, Store(a).favorites.size)
     }
 
     @Test
     fun leftAndRightStayInsideARow() {
         val a = launch()
-        val firstFav = focus(a)
-        assertEquals("left at the start of a strip stays put", firstFav, firstFav.focusSearch(View.FOCUS_LEFT))
-        val next = firstFav.focusSearch(View.FOCUS_RIGHT) as TileView
-        assertEquals("YouTube", next.label)
-        var last: View = firstFav
+        val first = focus(a)
+        assertEquals("left at the start of the dock stays put", first, first.focusSearch(View.FOCUS_LEFT))
+        assertEquals("YouTube", (first.focusSearch(View.FOCUS_RIGHT) as TileView).label)
+        var last: View = first
         repeat(10) { last = last.focusSearch(View.FOCUS_RIGHT) }
-        assertEquals("right at the end of a strip stays put", "VLC", (last as TileView).label)
-        val below = firstFav.focusSearch(View.FOCUS_DOWN) as TileView
-        assertEquals("down from Favorites lands on the Websites strip", "YouTube TV", below.label)
+        assertEquals("right at the end of the dock stays put", "VLC", (last as TileView).label)
+        assertEquals("down from the dock lands on the app grid", "App Store", (first.focusSearch(View.FOCUS_DOWN) as TileView).label)
     }
 
     @Test
@@ -301,13 +367,7 @@ class HomeScreenTest {
         val a = launch()
         tiles(content(a)).first { it.label == "Add website" }.performClick()
         settle()
-        val d = ShadowDialog.getLatestDialog()
-        val fields = ArrayList<android.widget.EditText>()
-        fun walk(v: View) {
-            if (v is android.widget.EditText) fields += v
-            if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
-        }
-        walk(d.window!!.decorView)
+        val fields = all<EditText>(ShadowDialog.getLatestDialog().window!!.decorView)
         fields[0].setText("bbc.com/news")
         shootDialog(a, "add-website")
         pressRow("Save")
@@ -318,16 +378,51 @@ class HomeScreenTest {
     }
 
     @Test
-    fun scrollingFollowsTheHighlightDownTheGrid() {
+    fun websitesOpenInBraveWhenItIsInstalledAndInTheBuiltInBrowserOtherwise() {
         val a = launch()
-        val all = tiles(content(a))
-        val lastApp = all.last()
-        lastApp.requestFocus()
+        val youtube = tiles(content(a)).first { it.label == "YouTube TV" }
+
+        youtube.performClick()
+        val builtIn = shadowOf(a).nextStartedActivity
+        assertEquals(BrowserActivity::class.java.name, builtIn.component!!.className)
+        assertEquals("https://www.youtube.com/tv", builtIn.getStringExtra(BrowserActivity.EXTRA_URL))
+
+        val probe = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")).addCategory(Intent.CATEGORY_BROWSABLE)
+        @Suppress("DEPRECATION")
+        shadowOf(ctx.packageManager).addResolveInfoForIntent(
+            probe, listOf(resolveInfo("org.other.browser", "Other"), resolveInfo("com.brave.browser", "Brave"))
+        )
+        youtube.performClick()
+        val external = shadowOf(a).nextStartedActivity
+        assertEquals(Intent.ACTION_VIEW, external.action)
+        assertEquals("com.brave.browser", external.`package`)
+        assertEquals("https://www.youtube.com/tv", external.dataString)
+
+        // The choice can be switched back in Settings.
+        all<ChipView>(content(a)).first { it.contentDescription == "Settings" }.performClick()
+        settle()
+        pressRow("Websites open in:")
+        ShadowDialog.getLatestDialog().dismiss()
+        youtube.performClick()
+        assertEquals(BrowserActivity::class.java.name, shadowOf(a).nextStartedActivity.component!!.className)
+    }
+
+    @Test
+    fun scrollingFollowsTheHighlightDownThePage() {
+        val a = launch()
+        val middle = tiles(content(a)).first { it.label == "Spotify" && it.parent !is DockLayout }
+        middle.requestFocus()
         settle()
         val loc = IntArray(2)
-        lastApp.getLocationOnScreen(loc)
-        assertTrue("focused tile is on screen (y=${loc[1]})", loc[1] >= 0 && loc[1] + lastApp.height <= Dim.h)
-        shootHome(a, "home-scrolled")
+        middle.getLocationOnScreen(loc)
+        assertTrue("focused tile is on screen (y=${loc[1]})", loc[1] >= 0 && loc[1] + middle.height <= Dim.h)
+        shootHome(a, "apps")
+
+        val last = tiles(content(a)).last()
+        last.requestFocus()
+        settle()
+        last.getLocationOnScreen(loc)
+        assertTrue("last tile is on screen (y=${loc[1]})", loc[1] >= 0 && loc[1] + last.height <= Dim.h)
     }
 
     @Test
@@ -335,9 +430,7 @@ class HomeScreenTest {
     fun layoutIsIdenticalOnALowDensityPanel() {
         val a = launch()
         assertEquals(1f, Dim.unit, 0.001f)
-        val t = tiles(content(a)).first { it.label == "Netflix" }
-        assertEquals("favourite card + padding", 352, t.width)
-        shootHome(a, "home-mdpi")
+        assertEquals("dock tile = 310 artwork + 2 x 18 padding", 346, focus(a).width)
     }
 
     @Test
@@ -345,8 +438,11 @@ class HomeScreenTest {
     fun layoutScalesDownTo720p() {
         val a = launch()
         assertEquals(2f / 3f, Dim.unit, 0.001f)
-        val row = tiles(content(a)).filter { it.label in installed.map { i -> i.label } }.takeLast(2)
-        assertTrue(row.all { it.right <= 1280 })
+        val loc = IntArray(2)
+        for (t in tiles(content(a))) {
+            t.getLocationOnScreen(loc)
+            assertTrue("${t.label} fits horizontally", loc[0] >= 0 && loc[0] + t.width <= 1280)
+        }
         shootHome(a, "home-720p")
     }
 

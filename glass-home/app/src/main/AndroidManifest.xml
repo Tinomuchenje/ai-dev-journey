@@ -61,7 +61,7 @@
         <activity
             android:name=".BrowserActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale"
-            android:exported="true"
+            android:exported="false"
             android:label="@string/browser_name"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
@@ -69,14 +69,6 @@
             android:theme="@style/Browser"
             android:windowSoftInputMode="adjustResize"
             tools:ignore="DiscouragedApi">
-            <!-- Lets links from other apps open in the remote-friendly browser. -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="http" />
-                <data android:scheme="https" />
-            </intent-filter>
         </activity>
     </application>
 </manifest>

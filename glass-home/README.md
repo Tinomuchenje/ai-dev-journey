@@ -1,8 +1,8 @@
 # Glass Home
 
-A replacement home screen for generic Android smart TVs: calm, glassy, and built for a
-remote. It replaces the stock tile wall with three things: your favourites, your
-websites, and everything else in one tidy grid.
+A replacement home screen for generic Android smart TVs, in the spirit of tvOS: a big
+quiet clock, a glass dock for the apps you actually use, and everything else as a grid
+of 16:9 artwork. The room is lit in the colour of whatever you have highlighted.
 
 ![Home screen](docs/home.jpg)
 
@@ -10,25 +10,28 @@ websites, and everything else in one tidy grid.
 | --- | --- |
 | ![Menu](docs/menu.jpg) | ![Apps](docs/apps.jpg) |
 
-These images are rendered from the real app code by the test suite (with stand-in app
-icons), not mock-ups.
+These images are drawn by the real app code in the test suite, with stand-in app icons.
+The blur behind the menu is done by the TV's GPU (Android 12+) and is approximated here.
 
 ## What it does
 
-- **Favorites** strip at the top. Streaming apps that are already installed are pinned
-  automatically on first run; hold **OK** on any tile to pin, unpin or reorder.
+- **A glass dock** for up to eight favourites. Tiles shrink to fit as it fills, like a
+  desktop dock. Streaming apps already on the TV are placed there on first run; hold
+  **OK** on any tile to add, remove or reorder.
+- **Every app gets proper artwork.** TV apps show their own banner. Phone and tablet apps
+  only ship a square icon, so their tile is built from it: the icon enlarged and blurred
+  into a backdrop in the app's own colours, with the sharp icon floating on top.
+- **Focus you can see from the sofa.** The highlighted tile lifts, glows in its own
+  colour and shows its name; the whole backdrop shifts to match. Buttons and menu rows
+  turn white when highlighted.
 - **Hide the noise.** Hold OK on an app and choose *Hide from home*. It stays installed
   but disappears. Bring it back from *Settings > Hidden apps*.
-- **Websites as tiles.** *Add website* turns any address into a tile that opens in the
-  built-in browser.
-- **A browser you can drive with a remote.** The arrow keys glide an on-screen pointer
-  (it speeds up while held), OK clicks, pushing against an edge scrolls, Back goes to the
-  previous page. Sites are requested as desktop pages rather than blown-up phone pages.
-  Hold OK (or press Menu) for the address bar, text size, and pinning the current site.
-- **Direct mode** for sites made for TVs (for example `youtube.com/tv`): arrow keys go
-  straight to the page and the browser identifies itself as a smart TV.
-- **Five backdrops** (*Settings > Wallpaper*), a clock, and a network indicator.
-- Tiny and light: a 260 KB app with no background services, sized for 1.5 GB TVs.
+- **Websites as tiles**, with the site's own icon. They open in **Brave** if it is
+  installed (otherwise the TV's default browser). A built-in browser that drives an
+  on-screen pointer with the arrow keys is there as a fallback, and can be made the
+  default under *Settings > Websites open in*.
+- **Backdrops:** the ambient one that follows the highlight, plus four still ones.
+- Tiny and light: a ~270 KB app with no background services, sized for 1.5 GB TVs.
   Everything scales to the panel, so it looks the same whatever density the firmware reports.
 
 ### Remote cheat sheet
@@ -38,11 +41,10 @@ icons), not mock-ups.
 | Home | OK | Open |
 | Home | Hold OK, or Menu | Options for that tile |
 | Home | Back or Home | Jump to the top |
-| Browser | Arrows | Move pointer; push an edge to scroll |
-| Browser | OK | Click |
-| Browser | Hold OK, hold Back, or Menu | Browser menu |
-| Browser | Back | Previous page, then exit |
-| Browser | CH+ / CH- | Page up / down |
+| Built-in browser | Arrows | Move pointer; push an edge to scroll |
+| Built-in browser | OK | Click |
+| Built-in browser | Hold OK, hold Back, or Menu | Browser menu |
+| Built-in browser | Back | Previous page, then exit |
 
 ## Install on the TV
 
@@ -74,15 +76,17 @@ Leave anything you do not recognise alone; system pieces often have unhelpful na
 
 ## Honest limits
 
-- **Tested on the JVM, not on your TV.** The home screen is exercised by 17 automated
-  tests (focus movement, pinning, hiding, scaling at 720p/1080p and different densities),
-  but nobody has run this build on the actual hardware yet. The browser's page handling in
-  particular can only be proven on the device.
-- **Netflix and Prime Video will still be the phone/tablet versions.** Their TV apps only
-  run on devices certified by those companies, and uncertified devices are also capped at
-  standard definition. A launcher cannot change that. A certified streaming stick is the
-  only real fix; an air-mouse remote makes the tablet versions much easier to live with.
-- The browser uses the TV's built-in web engine, so it is only as current as the firmware's.
+- **Tested on the JVM, not on your TV.** The home screen is exercised by 19 automated
+  tests (focus movement, the dock, hiding, scaling at 720p/1080p and different densities),
+  but nobody has run this build on the actual hardware yet.
+- **The Netflix TV app.** If you sideload the Android TV build of Netflix
+  (`com.netflix.ninja`), Glass Home shows it with its banner and puts it in the dock on
+  first run. Whether it runs, and at what resolution, is decided by Netflix's own device
+  checks, not by the launcher.
+- **Brave is a touch browser.** It works with a mouse or air-mouse remote; with arrow keys
+  alone, the built-in pointer browser is the easier one to drive.
+- Website icons are fetched from the site itself the first time; sites that offer none
+  get a letter tile.
 - Updating to a build signed on another machine needs the old one uninstalled first
   (favourites are lost), because each machine has its own debug signing key.
 
@@ -96,5 +100,6 @@ Needs JDK 17+ and the Android SDK (platform 35).
 ```
 
 Plain Kotlin and Android framework views, no libraries. Layout is in
-`HomeActivity.kt`, the drawing of tiles in `Views.kt`, the glass look in `Ui.kt`,
-backdrops in `Wallpapers.kt`, and the browser in `BrowserActivity.kt`.
+`HomeActivity.kt`, the drawing of tiles, dock and buttons in `Views.kt`, the glass,
+shadows and artwork generation in `Ui.kt`, backdrops in `Wallpapers.kt`, and the
+built-in browser in `BrowserActivity.kt`.
