@@ -1,6 +1,7 @@
 package tv.glasshome
 
 import android.app.Activity
+import android.app.ActivityOptions
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -22,11 +23,14 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextClock
 import android.widget.TextView
 import android.widget.Toast
+import java.util.Calendar
 import java.util.concurrent.Executors
 
 /**
@@ -45,6 +49,12 @@ class HomeActivity : Activity() {
     private lateinit var siteRow: RowLayout
     private lateinit var grid: LinearLayout
     private lateinit var netChip: ChipView
+    private lateinit var stage: FrameLayout
+    private lateinit var lens: FocusLens
+    private lateinit var clockColumn: LinearLayout
+    private lateinit var dateClock: TextClock
+    private lateinit var chips: RowLayout
+    private var entrancePlayed = false
 
     private var apps: List<AppEntry> = emptyList()
     private val siteArt = HashMap<String, Bitmap>()
@@ -78,22 +88,31 @@ class HomeActivity : Activity() {
     private val networkReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) = updateNetwork()
     }
+    private val minuteReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) = updateGreeting()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Dim.init(this)
         store = Store(this)
+        Motion.reduced = store.reducedMotion
         buildUi()
         applyWallpaper(animate = false)
         render()
         loadApps()
-        // The room takes on the colour of whatever is focused.
-        window.decorView.viewTreeObserver.addOnGlobalFocusChangeListener { _, now ->
+        // The highlight glides to whatever is focused, and the room takes on its colour.
+        val observer = window.decorView.viewTreeObserver
+        observer.addOnGlobalFocusChangeListener { _, now ->
+            lens.follow(now as? TileView)
             if (now is TileView) {
                 ambientTint = now.tint
                 applyWallpaper(animate = true)
             }
         }
+        observer.addOnScrollChangedListener { lens.invalidate() }
+        FocusView.onMotion = { lens.invalidate() }
+        lens.follow(focusedTile())
 
         val pkg = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -104,24 +123,43 @@ class HomeActivity : Activity() {
         }
         @Suppress("DEPRECATION")
         val net = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
+        val tick = IntentFilter(Intent.ACTION_TIME_TICK)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(packageReceiver, pkg, Context.RECEIVER_NOT_EXPORTED)
             registerReceiver(networkReceiver, net, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(minuteReceiver, tick, Context.RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(packageReceiver, pkg)
             registerReceiver(networkReceiver, net)
+            registerReceiver(minuteReceiver, tick)
         }
+    }
+
+    /** Coming back from an app: the home screen settles into place rather than snapping in. */
+    override fun onRestart() {
+        super.onRestart()
+        if (Motion.reduced) return
+        // Animate the screen-sized scroller, not the whole tall page, so the GPU buffer stays small.
+        scroll.animate().cancel()
+        scroll.alpha = 0f
+        scroll.scaleX = 0.965f
+        scroll.scaleY = 0.965f
+        scroll.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320)
+            .setInterpolator(DecelerateInterpolator(1.8f)).withLayer().start()
     }
 
     override fun onResume() {
         super.onResume()
         immersive()
         updateNetwork()
+        updateGreeting()
     }
 
     override fun onDestroy() {
         unregisterReceiver(packageReceiver)
         unregisterReceiver(networkReceiver)
+        unregisterReceiver(minuteReceiver)
+        FocusView.onMotion = null
         io.shutdown()
         super.onDestroy()
     }
@@ -134,6 +172,28 @@ class HomeActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() = goToTop()
+
+    /** Pressing a direction with nowhere to go gets a small shove back, not silence. */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val dx = when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> -1
+            KeyEvent.KEYCODE_DPAD_RIGHT -> 1
+            else -> 0
+        }
+        val dy = when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> -1
+            KeyEvent.KEYCODE_DPAD_DOWN -> 1
+            else -> 0
+        }
+        if ((dx != 0 || dy != 0) && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            val before = window.decorView.findFocus()
+            // Focus moves after this call returns, so look again once the press has been handled.
+            main.post {
+                if (before is FocusView && window.decorView.findFocus() === before) before.bump(dx, dy)
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_MENU) {
@@ -198,7 +258,19 @@ class HomeActivity : Activity() {
             clipToPadding = false
             setPadding(0, 0, 0, u(90))
         }
-        scroll.addView(column, MATCH_PARENT, WRAP_CONTENT)
+        // The page and, floating over it, the one highlight that travels between tiles.
+        stage = FrameLayout(this).apply {
+            clipChildren = false
+            clipToPadding = false
+        }
+        lens = FocusLens(this)
+        stage.addView(column, MATCH_PARENT, WRAP_CONTENT)
+        stage.addView(lens, MATCH_PARENT, MATCH_PARENT)
+        scroll.addView(stage, MATCH_PARENT, WRAP_CONTENT)
+        // Depth: the backdrop drifts a little as the page scrolls.
+        backdrop.scaleX = 1.08f
+        backdrop.scaleY = 1.08f
+        scroll.onScroll = { y -> backdrop.translationY = -(y * 0.06f).coerceAtMost(Dim.h * 0.035f) }
 
         // Top of the screen: a big quiet clock, and three round glass buttons.
         val top = FrameLayout(this).apply {
@@ -206,7 +278,7 @@ class HomeActivity : Activity() {
             clipToPadding = false
             setPadding(side, u(58), side - u(12), 0)
         }
-        val clockColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        clockColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         clockColumn.addView(TextClock(this).apply {
             format12Hour = "h:mm"
             format24Hour = "H:mm"
@@ -217,18 +289,18 @@ class HomeActivity : Activity() {
             letterSpacing = -0.02f
             setShadowLayer(uf(18f), 0f, uf(3f), 0x40000000)
         })
-        clockColumn.addView(TextClock(this).apply {
-            format12Hour = "EEEE, d MMMM"
-            format24Hour = "EEEE, d MMMM"
+        dateClock = TextClock(this).apply {
             setTextColor(withAlpha(Color.WHITE, 0.7f))
             setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(30f))
             typeface = Fonts.regular
             includeFontPadding = false
             setPadding(u(8), u(4), 0, 0)
-        })
+        }
+        clockColumn.addView(dateClock)
+        updateGreeting()
         top.addView(clockColumn, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.START or Gravity.TOP))
 
-        val chips = RowLayout(this)
+        chips = RowLayout(this)
         netChip = ChipView(this, Glyphs.OFFLINE, "Network").apply { setOnClickListener { openNetworkSettings() } }
         chips.addView(netChip)
         chips.addView(ChipView(this, Glyphs.GLOBE, "Browser").apply { setOnClickListener { openBrowserHome() } })
@@ -274,6 +346,54 @@ class HomeActivity : Activity() {
         root.addView(backdrop, MATCH_PARENT, MATCH_PARENT)
         root.addView(scroll, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
+    }
+
+    private fun updateGreeting() {
+        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val hello = when {
+            hour < 5 -> "Good night"
+            hour < 12 -> "Good morning"
+            hour < 18 -> "Good afternoon"
+            else -> "Good evening"
+        }
+        val format = "'$hello'  ·  EEEE, d MMMM"
+        if (dateClock.format24Hour != format) {
+            dateClock.format12Hour = format
+            dateClock.format24Hour = format
+        }
+    }
+
+    /**
+     * The opening: the clock eases down, the buttons pop in, the dock rises, and the tiles
+     * arrive one after another. Under a second in all, played once when the apps are ready.
+     */
+    private fun playEntrance() {
+        if (entrancePlayed || Motion.reduced) return
+        entrancePlayed = true
+        val ease = DecelerateInterpolator(2.2f)
+        fun arrive(v: View, delay: Long, rise: Float, duration: Long = 520) {
+            v.animate().cancel()
+            v.alpha = 0f
+            v.translationY = rise
+            v.animate().alpha(1f).translationY(0f).setStartDelay(delay).setDuration(duration)
+                .setInterpolator(ease).setUpdateListener { lens.invalidate() }.start()
+        }
+        arrive(clockColumn, 0, -uf(28f), 640)
+        for (i in 0 until chips.childCount) {
+            val chip = chips.getChildAt(i)
+            chip.animate().cancel()
+            chip.alpha = 0f
+            chip.scaleX = 0.5f
+            chip.scaleY = 0.5f
+            chip.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(120L + i * 70).setDuration(420)
+                .setInterpolator(OvershootInterpolator(2f)).start()
+        }
+        arrive(dock, 80, uf(70f), 600)
+        for (i in 0 until dock.childCount) arrive(dock.getChildAt(i), 160L + i * 55, uf(34f))
+        for (r in 0 until minOf(grid.childCount, 3)) {
+            val row = grid.getChildAt(r) as ViewGroup
+            for (i in 0 until row.childCount) arrive(row.getChildAt(i), 330L + r * 90 + i * 28, uf(48f))
+        }
     }
 
     // ---------------------------------------------------------------- data
@@ -374,12 +494,14 @@ class HomeActivity : Activity() {
         })
 
         val target = (if (firstRender) null else findTile(wantKey, wantDock)) ?: firstTile()
+        val opening = firstRender && apps.isNotEmpty()
         if (apps.isNotEmpty()) firstRender = false
         if (target != null) {
             // Also the fallback the system uses when it has to pick a highlight by itself.
             if (Build.VERSION.SDK_INT >= 26) target.isFocusedByDefault = true
             target.requestFocus()
         }
+        if (opening) playEntrance()
     }
 
     private fun findTile(key: String?, preferDock: Boolean): View? {
@@ -403,7 +525,7 @@ class HomeActivity : Activity() {
             label = app.label
             art = app.art
             tint = app.tint
-            setOnClickListener { launch(app) }
+            setOnClickListener { launch(app, it) }
             setOnLongClickListener { appMenu(app, inDock); true }
         }
 
@@ -431,12 +553,27 @@ class HomeActivity : Activity() {
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
 
-    private fun launch(app: AppEntry) {
+    /** Opens [app]; when started from a tile, its window grows out of that tile. */
+    private fun launch(app: AppEntry, from: View? = null) {
         val category = if (app.leanback) Intent.CATEGORY_LEANBACK_LAUNCHER else Intent.CATEGORY_LAUNCHER
-        start(
-            Intent(Intent.ACTION_MAIN).addCategory(category).setComponent(app.component)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-        )
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(category).setComponent(app.component)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        val reveal = if (from == null || Motion.reduced) null else try {
+            if (Build.VERSION.SDK_INT >= 23) {
+                ActivityOptions.makeClipRevealAnimation(from, 0, 0, from.width, from.height)
+            } else {
+                ActivityOptions.makeScaleUpAnimation(from, 0, 0, from.width, from.height)
+            }.toBundle()
+        } catch (e: Exception) {
+            null
+        }
+        try {
+            startActivity(intent, reveal)
+        } catch (e: ActivityNotFoundException) {
+            toast("This app could not be opened.")
+        } catch (e: SecurityException) {
+            toast("Not allowed to open that.")
+        }
     }
 
     private fun openBuiltIn(url: String?, tvMode: Boolean) {
@@ -649,6 +786,10 @@ class HomeActivity : Activity() {
         d.row({ "Backdrop: ${Wallpapers.name(store.wallpaper)}" }, keepOpen = true) {
             store.wallpaper = (store.wallpaper + 1) % Wallpapers.count
             applyWallpaper(animate = true)
+        }
+        d.row({ if (store.reducedMotion) "Motion: reduced" else "Motion: full" }, keepOpen = true) {
+            store.reducedMotion = !store.reducedMotion
+            Motion.reduced = store.reducedMotion
         }
         val external = externalBrowser()
         if (external != null) {

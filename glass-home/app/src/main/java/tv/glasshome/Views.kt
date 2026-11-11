@@ -18,16 +18,31 @@ import android.text.TextUtils
 import android.view.KeyEvent
 import android.view.View
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-/** Shared focus behaviour: a 0..1 "lift" value animated on focus or pointer hover. */
+/** One switch for all decorative movement, for TVs too slow to enjoy it. */
+object Motion {
+    var reduced = false
+}
+
+/**
+ * Shared focus behaviour. [lift] runs from 0 (resting) to 1 (focused) and springs a little
+ * past 1 on the way in; [glow] is the same value held to 0..1 for opacities. Nothing here
+ * moves unless the remote was just pressed: an idle screen draws no frames at all.
+ */
 abstract class FocusView(ctx: Context) : View(ctx) {
     protected var lift = 0f
+    protected val glow get() = lift.coerceIn(0f, 1f)
+
+    /** Runs 0..1 once each time focus arrives; drives the streak of light crossing a tile. */
+    protected var sweep = 1f
     private var anim: ValueAnimator? = null
+    private var sweepAnim: ValueAnimator? = null
 
     init {
         isFocusable = true
@@ -39,25 +54,64 @@ abstract class FocusView(ctx: Context) : View(ctx) {
         if (Build.VERSION.SDK_INT >= 26) defaultFocusHighlightEnabled = false
     }
 
+    private fun moved() {
+        if (isFocused) onMotion?.invoke()
+    }
+
     private fun refresh() {
-        val target = if (isFocused || isHovered) 1f else 0f
-        translationZ = if (target > 0f) uf(8f) else 0f
+        val on = isFocused || isHovered
+        val target = if (on) 1f else 0f
+        translationZ = if (on) uf(8f) else 0f
         anim?.cancel()
-        if (!isAttachedToWindow) {
+        sweepAnim?.cancel()
+        sweep = 1f
+        if (!isAttachedToWindow || Motion.reduced) {
             lift = target
             invalidate()
+            moved()
             return
         }
         anim = ValueAnimator.ofFloat(lift, target).apply {
-            duration = 170
-            interpolator = DecelerateInterpolator(1.6f)
+            duration = if (on) 340 else 200
+            // Set separately: on Android 5.0 these two classes share no common parent.
+            if (on) setInterpolator(OvershootInterpolator(2.4f)) else setInterpolator(DecelerateInterpolator(1.6f))
             addUpdateListener {
                 lift = it.animatedValue as Float
                 invalidate()
+                moved()
             }
             start()
         }
+        if (on) {
+            sweepAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 720
+                startDelay = 90
+                interpolator = DecelerateInterpolator(1.4f)
+                addUpdateListener {
+                    sweep = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+        }
     }
+
+    /** A little shove and spring back: the answer to pressing a direction with nowhere to go. */
+    fun bump(dx: Int, dy: Int) {
+        if (Motion.reduced) return
+        val d = uf(16f)
+        animate().cancel()
+        // A view's animator remembers its last start delay; the entrance leaves one behind.
+        animate().setStartDelay(0).translationX(dx * d).translationY(dy * d).setDuration(90)
+            .setInterpolator(DecelerateInterpolator()).setUpdateListener { moved() }
+            .withEndAction {
+                animate().translationX(0f).translationY(0f).setDuration(360)
+                    .setInterpolator(OvershootInterpolator(3f)).setUpdateListener { moved() }.start()
+            }.start()
+    }
+
+    // Lets the GPU fade a tile without first rendering it into an off-screen buffer.
+    override fun hasOverlappingRendering(): Boolean = false
 
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
         super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
@@ -77,20 +131,26 @@ abstract class FocusView(ctx: Context) : View(ctx) {
 
     override fun onDetachedFromWindow() {
         anim?.cancel()
+        sweepAnim?.cancel()
         super.onDetachedFromWindow()
+    }
+
+    companion object {
+        /** Called while the focused view is moving or growing, so the highlight can keep up. */
+        var onMotion: (() -> Unit)? = null
     }
 }
 
 /**
  * One home-screen tile, in the manner of a tvOS app icon: a 16:9 piece of artwork with
- * rounded corners that sits quietly until focused, then lifts toward you - it grows,
- * throws a glow in its own colour, catches a streak of light, and shows its name.
- * Drawn entirely in onDraw: one cheap display list per tile, no nested layouts.
+ * rounded corners that sits quietly until focused, then springs toward you, catches a
+ * streak of light, and shows its name. The bright ring around it is not drawn here: one
+ * shared [FocusLens] glides from tile to tile instead.
  */
 class TileView(
     ctx: Context,
-    private val cardW: Int,
-    private val cardH: Int,
+    val cardW: Int,
+    val cardH: Int,
     private val labelDrop: Float = uf(42f),
 ) : FocusView(ctx) {
     var key = ""
@@ -112,16 +172,14 @@ class TileView(
     var tint = Tint.DEFAULT
 
     private val pad = PAD
-    private val radius = cardH * 0.16f
+    val radius = cardH * 0.16f
     private val rect = RectF()
     private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val sheen = Paint(Paint.ANTI_ALIAS_FLAG)
     private val streak = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var streakShader: LinearGradient? = null
+    private val streakMatrix = Matrix()
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = Color.WHITE
-    }
     private val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val glass = GlassDrawable.tile(radius)
     private val labelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -140,10 +198,12 @@ class TileView(
         val top = pad.toFloat()
         val bottom = top + cardH
         sheen.shader = LinearGradient(0f, top, 0f, top + cardH * 0.5f, 0x24FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
-        streak.shader = LinearGradient(
-            left, top, left + cardW * 0.9f, bottom,
-            intArrayOf(0x00FFFFFF, 0x3DFFFFFF, 0x00FFFFFF), floatArrayOf(0.1f, 0.42f, 0.7f), Shader.TileMode.CLAMP
+        // A slanted band of light, a third of the tile wide, that is slid across on focus.
+        streakShader = LinearGradient(
+            0f, top, cardW * 0.42f, bottom,
+            intArrayOf(0x00FFFFFF, 0x61FFFFFF, 0x00FFFFFF), null, Shader.TileMode.CLAMP
         )
+        streak.shader = streakShader
         edge.shader = LinearGradient(0f, top, 0f, bottom, 0x66FFFFFF, 0x0DFFFFFF, Shader.TileMode.CLAMP)
         edge.strokeWidth = uf(1.5f)
         art?.let { b ->
@@ -156,6 +216,16 @@ class TileView(
         }
     }
 
+    private fun scale() = (1f + SCALE * lift) * (if (isPressed) 0.96f else 1f)
+
+    /** Where the card is right now, in this view's own coordinates, growth included. */
+    fun cardRect(out: RectF) {
+        val s = scale()
+        val cx = width / 2f
+        val cy = pad + cardH / 2f
+        out.set(cx - cardW * s / 2f, cy - cardH * s / 2f, cx + cardW * s / 2f, cy + cardH * s / 2f)
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         setMeasuredDimension(cardW + pad * 2, cardH + pad * 2 + LABEL_H)
     }
@@ -164,17 +234,16 @@ class TileView(
         if (!prepared) prepare()
         val cx = width / 2f
         val cy = pad + cardH / 2f
-        val scale = (1f + SCALE * lift) * (if (isPressed) 0.97f else 1f)
+        val scale = scale()
         val l = pad.toFloat()
         val t = pad.toFloat()
 
         c.save()
         c.scale(scale, scale, cx, cy)
         val solid = art != null
-        // Resting: a quiet contact shadow. Focused: a deep shadow plus light in the tile's colour.
-        Shadow.draw(c, l, t, cardW, cardH, radius, uf(12f), Color.BLACK, lerp(0.42f, 0f, lift), uf(7f), !solid)
-        Shadow.draw(c, l, t, cardW, cardH, radius, uf(34f), Color.BLACK, 0.6f * lift, uf(26f), !solid)
-        Shadow.draw(c, l, t, cardW, cardH, radius, uf(38f), Tint.glow(tint), 0.7f * lift, uf(8f), !solid)
+        // Resting: a quiet contact shadow. Focused: the tile leaves the surface, so the shadow drops away.
+        Shadow.draw(c, l, t, cardW, cardH, radius, uf(12f), Color.BLACK, lerp(0.42f, 0f, glow), uf(7f), !solid)
+        Shadow.draw(c, l, t, cardW, cardH, radius, uf(34f), Color.BLACK, 0.6f * glow, uf(26f), !solid)
 
         rect.set(l, t, l + cardW, t + cardH)
         if (solid) {
@@ -182,39 +251,33 @@ class TileView(
             c.drawRoundRect(rect, radius, radius, sheen)
         } else {
             glass.setBounds(pad, pad, pad + cardW, pad + cardH)
-            glass.focus = lift
+            glass.focus = glow
             glass.draw(c)
-            glyphPaint.alpha = (lerp(0.7f, 1f, lift) * 255).roundToInt()
+            glyphPaint.alpha = (lerp(0.7f, 1f, glow) * 255).roundToInt()
             Glyphs.draw(c, glyph, cx, cy, cardH * 0.3f, glyphPaint)
         }
-        if (lift > 0.01f) {
-            streak.alpha = (255 * lift).roundToInt()
+        if (sweep < 1f) {
+            streakMatrix.setTranslate(l + lerp(-cardW * 0.5f, cardW * 1.1f, sweep), 0f)
+            streakShader?.setLocalMatrix(streakMatrix)
+            streak.alpha = (255 * kotlin.math.sin(Math.PI * sweep)).roundToInt().coerceIn(0, 255)
             c.drawRoundRect(rect, radius, radius, streak)
         }
-        if (solid) {
+        if (solid && glow < 1f) {
             val half = edge.strokeWidth / 2f
             rect.inset(half, half)
-            edge.alpha = (255 * (1f - lift)).roundToInt()
+            edge.alpha = (255 * (1f - glow)).roundToInt()
             c.drawRoundRect(rect, radius - half, radius - half, edge)
-            rect.inset(-half, -half)
-        }
-        if (lift > 0.01f) {
-            val sw = uf(3f)
-            ring.strokeWidth = sw
-            ring.alpha = (235 * lift).roundToInt()
-            rect.inset(sw / 2f, sw / 2f)
-            c.drawRoundRect(rect, radius - sw / 2f, radius - sw / 2f, ring)
         }
         c.restore()
 
         // Like tvOS, only the focused tile is captioned.
-        if (lift > 0.01f) {
+        if (glow > 0.01f) {
             val text = fitted ?: TextUtils.ellipsize(
                 label, labelPaint, cardW * 1.25f, TextUtils.TruncateAt.END
             ).toString().also { fitted = it }
-            labelPaint.alpha = (255 * lift).roundToInt()
+            labelPaint.alpha = (255 * glow).roundToInt()
             val grow = (scale - 1f) * cardH / 2f
-            c.drawText(text, cx, pad + cardH + grow + labelDrop - uf(6f) * (1f - lift), labelPaint)
+            c.drawText(text, cx, pad + cardH + grow + labelDrop - uf(8f) * (1f - glow), labelPaint)
         }
     }
 
@@ -222,6 +285,157 @@ class TileView(
         const val SCALE = 0.1f
         val PAD get() = u(18)
         val LABEL_H get() = u(50)
+    }
+}
+
+/**
+ * The single highlight on the home screen: a bright ring with light in the focused tile's
+ * colour spilling around it. It does not jump between tiles - it glides, its leading edge
+ * racing ahead and its trailing edge catching up, so it stretches like a drop of liquid
+ * and settles on the new tile. One view, a few draw calls, and only while it is moving.
+ */
+class FocusLens(ctx: Context) : View(ctx) {
+    private var target: TileView? = null
+    private val from = RectF()
+    private val to = RectF()
+    private val cur = RectF()
+
+    /** Where the ring was last drawn, in this view's coordinates. */
+    internal val drawn: RectF get() = cur
+    private var fromTint = Tint.DEFAULT
+    private var travel = 1f
+    private var presence = 0f
+    private var travelAnim: ValueAnimator? = null
+    private var presenceAnim: ValueAnimator? = null
+    private val origin = Rect()
+    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.WHITE
+    }
+
+    init {
+        isFocusable = false
+        isClickable = false
+    }
+
+    /** Move to [tile], or fade away when focus has left the tiles (null). */
+    fun follow(tile: TileView?) {
+        if (tile === target) return
+        val visible = presence > 0.01f && target != null
+        if (visible) from.set(cur)
+        fromTint = target?.tint ?: tile?.tint ?: Tint.DEFAULT
+        if (tile != null) target = tile
+        travelAnim?.cancel()
+        if (tile == null) {
+            fade(0f)
+            return
+        }
+        if (!visible || Motion.reduced || !isAttachedToWindow) {
+            travel = 1f
+        } else {
+            travel = 0f
+            travelAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 300
+                addUpdateListener {
+                    travel = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+        }
+        fade(1f)
+        invalidate()
+    }
+
+    private fun fade(goal: Float) {
+        presenceAnim?.cancel()
+        if (Motion.reduced || !isAttachedToWindow) {
+            presence = goal
+            if (goal == 0f) target = null
+            invalidate()
+            return
+        }
+        presenceAnim = ValueAnimator.ofFloat(presence, goal).apply {
+            duration = 180
+            addUpdateListener {
+                presence = it.animatedValue as Float
+                if (presence == 0f && goal == 0f) target = null
+                invalidate()
+            }
+            start()
+        }
+    }
+
+    /** The target's card in this view's coordinates, wherever scrolling and animation have put it. */
+    private fun locate(tile: TileView, out: RectF): Boolean {
+        val host = parent as? android.view.ViewGroup ?: return false
+        if (!tile.isAttachedToWindow) return false
+        origin.set(0, 0, 0, 0)
+        try {
+            host.offsetDescendantRectToMyCoords(tile, origin)
+        } catch (e: IllegalArgumentException) {
+            return false // not under the same parent
+        }
+        var dx = 0f
+        var dy = 0f
+        var v: View? = tile
+        while (v != null && v !== host) {
+            dx += v.translationX
+            dy += v.translationY
+            v = v.parent as? View
+        }
+        tile.cardRect(out)
+        out.offset(origin.left + dx, origin.top + dy)
+        return true
+    }
+
+    private fun lead(t: Float): Float {
+        val u = 1f - t
+        return 1f - u * u * u * u
+    }
+
+    private fun trail(t: Float) = t * t * (3f - 2f * t)
+
+    override fun onDraw(c: Canvas) {
+        val tile = target ?: return
+        if (presence <= 0.01f || !locate(tile, to)) return
+        if (travel >= 1f) {
+            cur.set(to)
+        } else {
+            val right = to.centerX() >= from.centerX()
+            val down = to.centerY() >= from.centerY()
+            cur.left = lerp(from.left, to.left, if (right) trail(travel) else lead(travel))
+            cur.right = lerp(from.right, to.right, if (right) lead(travel) else trail(travel))
+            cur.top = lerp(from.top, to.top, if (down) trail(travel) else lead(travel))
+            cur.bottom = lerp(from.bottom, to.bottom, if (down) lead(travel) else trail(travel))
+        }
+        val alpha = presence * tile.alpha
+        val k = cur.width() / tile.cardW
+        val radius = tile.radius * k
+
+        // Light in the tile's colour, spilling onto its neighbours. Drawn from the tile's
+        // own base size and stretched, so no new images are made while it moves.
+        c.save()
+        c.translate(cur.left, cur.top)
+        c.scale(cur.width() / tile.cardW, cur.height() / tile.cardH)
+        if (travel < 1f) {
+            Shadow.draw(c, 0f, 0f, tile.cardW, tile.cardH, tile.radius, uf(38f), Tint.glow(fromTint), 0.75f * alpha * (1f - travel), uf(6f), true)
+        }
+        Shadow.draw(c, 0f, 0f, tile.cardW, tile.cardH, tile.radius, uf(38f), Tint.glow(tile.tint), 0.75f * alpha * travel, uf(6f), true)
+        c.restore()
+
+        val sw = uf(3.5f)
+        ring.strokeWidth = sw
+        ring.alpha = (240 * alpha).roundToInt().coerceIn(0, 255)
+        cur.inset(sw / 2f, sw / 2f)
+        c.drawRoundRect(cur, radius - sw / 2f, radius - sw / 2f, ring)
+        cur.inset(-sw / 2f, -sw / 2f)
+    }
+
+    override fun onDetachedFromWindow() {
+        travelAnim?.cancel()
+        presenceAnim?.cancel()
+        super.onDetachedFromWindow()
     }
 }
 
@@ -253,12 +467,14 @@ class ChipView(ctx: Context, glyph: Int, description: String) : FocusView(ctx) {
         c.save()
         c.scale(scale, scale, cx, cy)
         val o = outer.toFloat()
-        Shadow.draw(c, o, o, size, size, size / 2f, uf(14f), Color.BLACK, lerp(0.28f, 0.5f, lift), uf(6f), true)
-        Shadow.draw(c, o, o, size, size, size / 2f, uf(22f), Color.WHITE, 0.4f * lift, 0f, true)
+        Shadow.draw(c, o, o, size, size, size / 2f, uf(14f), Color.BLACK, lerp(0.28f, 0.5f, glow), uf(6f), true)
+        Shadow.draw(c, o, o, size, size, size / 2f, uf(22f), Color.WHITE, 0.4f * glow, 0f, true)
         glass.setBounds(outer, outer, outer + size, outer + size)
-        glass.focus = lift
+        glass.focus = glow
         glass.draw(c)
-        glyphPaint.color = blend(Color.WHITE, INK, lift)
+        glyphPaint.color = blend(Color.WHITE, INK, glow)
+        // The cog gives a sixth of a turn as it is selected.
+        if (glyph == Glyphs.GEAR) c.rotate(60f * lift, cx, cy)
         Glyphs.draw(c, glyph, cx, cy, size * 0.4f, glyphPaint)
         c.restore()
     }
@@ -362,6 +578,14 @@ class CenterScrollView(ctx: Context) : ScrollView(ctx) {
         clipChildren = false
         clipToPadding = false
         isFocusable = false
+    }
+
+    /** Told the new scroll offset whenever the page moves. */
+    var onScroll: ((Int) -> Unit)? = null
+
+    override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
+        super.onScrollChanged(l, t, oldl, oldt)
+        onScroll?.invoke(t)
     }
 
     // Let the framework's normal focus search drive the D-pad; we only follow the focus.

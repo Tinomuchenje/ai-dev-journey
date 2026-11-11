@@ -10,6 +10,10 @@ of 16:9 artwork. The room is lit in the colour of whatever you have highlighted.
 | --- | --- |
 | ![Menu](docs/menu.jpg) | ![Apps](docs/apps.jpg) |
 
+| The highlight in mid-glide between two tiles | A full dock |
+| --- | --- |
+| ![Glide](docs/glide.jpg) | ![Dock](docs/dock.jpg) |
+
 These images are drawn by the real app code in the test suite, with stand-in app icons.
 The blur behind the menu is done by the TV's GPU (Android 12+) and is approximated here.
 
@@ -21,9 +25,9 @@ The blur behind the menu is done by the TV's GPU (Android 12+) and is approximat
 - **Every app gets proper artwork.** TV apps show their own banner. Phone and tablet apps
   only ship a square icon, so their tile is built from it: the icon enlarged and blurred
   into a backdrop in the app's own colours, with the sharp icon floating on top.
-- **Focus you can see from the sofa.** The highlighted tile lifts, glows in its own
-  colour and shows its name; the whole backdrop shifts to match. Buttons and menu rows
-  turn white when highlighted.
+- **Focus you can see from the sofa.** The highlighted tile springs forward, catches a
+  streak of light and shows its name; the whole backdrop shifts to its colour. Buttons
+  and menu rows turn white when highlighted.
 - **Hide the noise.** Hold OK on an app and choose *Hide from home*. It stays installed
   but disappears. Bring it back from *Settings > Hidden apps*.
 - **Websites as tiles**, with the site's own icon. They open in **Brave** if it is
@@ -33,6 +37,33 @@ The blur behind the menu is done by the TV's GPU (Android 12+) and is approximat
 - **Backdrops:** the ambient one that follows the highlight, plus four still ones.
 - Tiny and light: a ~270 KB app with no background services, sized for 1.5 GB TVs.
   Everything scales to the panel, so it looks the same whatever density the firmware reports.
+
+### Motion
+
+Every movement answers a button press; an idle screen draws no frames at all.
+
+- **The highlight glides.** There is one focus ring for the whole screen. It travels
+  from tile to tile with its leading edge ahead of its trailing edge, so it stretches
+  like a drop of liquid and settles on the new tile, carrying a glow in that app's colour.
+- **An opening sequence** of under a second: the clock eases down, the buttons pop in,
+  the dock rises and the tiles arrive one after another.
+- **Apps open out of their tile**, and coming back home the screen settles into place.
+- **A shove at the edge.** Pressing a direction with nowhere to go nudges the tile and
+  lets it spring back, instead of doing nothing.
+- **Depth:** the backdrop drifts slightly as the page scrolls; menus spring up and their
+  rows follow a beat apart.
+- *Settings > Motion: reduced* switches all of it off for a TV that struggles.
+
+[`docs/motion.mp4`](docs/motion.mp4) is a recording of these, stepped frame by frame from
+the app code.
+
+### Where the ideas come from
+
+tvOS for the overall stage (dock, 16:9 artwork, caption only on the focused item, white
+focused controls) and its Liquid Glass material for the dock and buttons; the
+PlayStation 5 home for a backdrop that follows the selection; the Nintendo Switch for
+the shove at the end of a row; Projectivy Launcher, the best-regarded Android TV
+replacement, for the lesson that people want to hide and reorder things themselves.
 
 ### Remote cheat sheet
 
@@ -76,8 +107,9 @@ Leave anything you do not recognise alone; system pieces often have unhelpful na
 
 ## Honest limits
 
-- **Tested on the JVM, not on your TV.** The home screen is exercised by 19 automated
-  tests (focus movement, the dock, hiding, scaling at 720p/1080p and different densities),
+- **Tested on the JVM, not on your TV.** The home screen is exercised by 22 automated
+  tests (focus movement, the animations, the dock, hiding, scaling at 720p/1080p and
+  different densities),
   but nobody has run this build on the actual hardware yet.
 - **The Netflix TV app.** If you sideload the Android TV build of Netflix
   (`com.netflix.ninja`), Glass Home shows it with its banner and puts it in the dock on
@@ -97,6 +129,7 @@ Needs JDK 17+ and the Android SDK (platform 35).
 ```bash
 ./gradlew assembleRelease      # -> app/build/outputs/apk/release/app-release.apk
 ./gradlew testDebugUnitTest    # runs the tests and writes PNGs to app/build/screenshots
+GLASS_REEL=1 ./gradlew testDebugUnitTest --tests '*MotionReel*'   # animation frames -> app/build/reel
 ```
 
 Plain Kotlin and Android framework views, no libraries. Layout is in

@@ -34,10 +34,12 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowChoreographer
 import org.robolectric.shadows.ShadowDialog
 import org.robolectric.shadows.ShadowLooper
 import java.io.File
 import java.io.FileOutputStream
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 /**
@@ -137,6 +139,19 @@ class HomeScreenTest {
         return BitmapDrawable(ctx.resources, bmp)
     }
 
+    /**
+     * By default the JVM test environment fast-forwards every animation to its end the
+     * moment it starts. This makes it step frame by frame instead (16 ms apart), so a test
+     * can look at an animation while it is still under way.
+     */
+    internal fun stepFrameByFrame() {
+        ShadowChoreographer.setPaused(true)
+        ShadowChoreographer.setFrameDelay(Duration.ofMillis(16))
+    }
+
+    /** The stand-in apps as (package, name, icon), for other tests that want the same screen. */
+    internal fun standIns(): List<Triple<String, String, Drawable>> = installed.map { Triple(it.pkg, it.label, iconFor(it)) }
+
     private fun resolveInfo(pkg: String, label: String, iconId: Int = 0) = ResolveInfo().apply {
         nonLocalizedLabel = label
         activityInfo = ActivityInfo().apply {
@@ -169,7 +184,7 @@ class HomeScreenTest {
             Thread.sleep(20)
             ShadowLooper.idleMainLooper()
         }
-        repeat(60) {
+        repeat(110) {
             ShadowLooper.idleMainLooper(16, TimeUnit.MILLISECONDS)
             screen?.draw(scratch)
         }
@@ -261,6 +276,107 @@ class HomeScreenTest {
         assertEquals("Netflix", focus(a).label)
         assertTrue("first tile sits in the dock", focus(a).parent is DockLayout)
         shootHome(a, "home")
+    }
+
+    @Test
+    fun theOpeningAnimationLeavesEverythingExactlyInPlace() {
+        val a = launch()
+        for (v in views(content(a))) {
+            if (v !is TileView && v !is ChipView && v !is DockLayout) continue
+            assertEquals("alpha of $v", 1f, v.alpha, 0.001f)
+            assertEquals("offset of $v", 0f, v.translationY, 0.001f)
+            assertEquals("scale of $v", 1f, v.scaleX, 0.001f)
+        }
+    }
+
+    @Test
+    fun theHighlightGlidesToTheFocusedTileAndSettlesOnIt() {
+        val a = launch()
+        val lens = all<FocusLens>(content(a)).single()
+        fun expected(tile: TileView): RectF {
+            val card = RectF()
+            tile.cardRect(card)
+            val at = IntArray(2)
+            val base = IntArray(2)
+            tile.getLocationOnScreen(at)
+            lens.getLocationOnScreen(base)
+            card.offset((at[0] - base[0]).toFloat(), (at[1] - base[1]).toFloat())
+            return card
+        }
+        fun assertOn(tile: TileView) {
+            val want = expected(tile)
+            val got = lens.drawn
+            assertEquals("left", want.left, got.left, 1f)
+            assertEquals("top", want.top, got.top, 1f)
+            assertEquals("right", want.right, got.right, 1f)
+            assertEquals("bottom", want.bottom, got.bottom, 1f)
+        }
+        assertOn(focus(a))
+
+        // Along the dock, down into the grid, and far enough to make the page scroll.
+        (focus(a).focusSearch(View.FOCUS_RIGHT) as TileView).requestFocus()
+        settle()
+        assertEquals("YouTube", focus(a).label)
+        assertOn(focus(a))
+        val deep = tiles(content(a)).first { it.label == "Twitter" }
+        deep.requestFocus()
+        settle()
+        assertOn(deep)
+
+        val first = tiles(content(a)).first()
+        first.requestFocus()
+        settle()
+        assertOn(first)
+
+        // From here, watch the motion itself rather than only where it ends up.
+        stepFrameByFrame()
+        val next = first.focusSearch(View.FOCUS_RIGHT) as TileView
+        next.requestFocus()
+        repeat(5) {
+            ShadowLooper.idleMainLooper(16, TimeUnit.MILLISECONDS)
+            screen!!.draw(scratch)
+        }
+        val mid = RectF(lens.drawn)
+        val start = expected(first)
+        val end = expected(next)
+        assertTrue("mid-glide the ring has left the first tile", mid.right > start.right + 1f)
+        assertTrue("and its trailing edge has not arrived yet", mid.left < end.left - 1f)
+        assertTrue("so it is stretched wider than a tile", mid.width() > end.width() + 4f)
+        settle()
+        assertOn(next)
+
+        // A press with nowhere to go shoves the tile and lets it spring back to rest.
+        first.requestFocus()
+        settle()
+        a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT))
+        var furthest = 0f
+        repeat(30) {
+            ShadowLooper.idleMainLooper(16, TimeUnit.MILLISECONDS)
+            furthest = minOf(furthest, first.translationX)
+        }
+        assertTrue("tile is shoved left (reached $furthest)", furthest < -4f)
+        settle()
+        assertEquals(0f, first.translationX, 0.001f)
+        assertOn(first)
+    }
+
+    @Test
+    fun reducedMotionTurnsTheAnimationsOff() {
+        val a = launch()
+        all<ChipView>(content(a)).first { it.contentDescription == "Settings" }.performClick()
+        settle()
+        pressRow("Motion: full")
+        assertTrue(Store(a).reducedMotion && Motion.reduced)
+        ShadowDialog.getLatestDialog().dismiss()
+        val next = focus(a).focusSearch(View.FOCUS_RIGHT) as TileView
+        next.requestFocus()
+        // No waiting: with motion off, the highlight is simply there.
+        screen!!.draw(scratch)
+        val lens = all<FocusLens>(content(a)).single()
+        val card = RectF()
+        next.cardRect(card)
+        assertEquals(card.width(), lens.drawn.width(), 1f)
+        Motion.reduced = false
     }
 
     @Test

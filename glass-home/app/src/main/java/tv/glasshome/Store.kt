@@ -72,6 +72,11 @@ class Store(ctx: Context) {
         get() = sp.getBoolean("builtInBrowser", false)
         set(v) = sp.edit().putBoolean("builtInBrowser", v).apply()
 
+    /** True: no decorative movement, for TVs that struggle with it. */
+    var reducedMotion: Boolean
+        get() = sp.getBoolean("reducedMotion", false)
+        set(v) = sp.edit().putBoolean("reducedMotion", v).apply()
+
     var seeded: Boolean
         get() = sp.getBoolean("seeded", false)
         set(v) = sp.edit().putBoolean("seeded", v).apply()

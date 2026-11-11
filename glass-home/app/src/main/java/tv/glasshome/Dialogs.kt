@@ -30,6 +30,7 @@ class GlassDialog(
 ) : Dialog(activity, R.style.GlassDialog) {
 
     private val rows: LinearLayout
+    private val panel: LinearLayout
     private var first: View? = null
     private val blurTarget: View? = activity.findViewById(android.R.id.content)
 
@@ -37,7 +38,7 @@ class GlassDialog(
         val root = FrameLayout(context)
         root.setOnClickListener { dismiss() }
 
-        val panel = LinearLayout(context).apply {
+        panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             background = GlassDrawable.panel(uf(48f))
             setPadding(u(40), u(40), u(40), u(36))
@@ -165,6 +166,20 @@ class GlassDialog(
             blurTarget?.setRenderEffect(RenderEffect.createBlurEffect(uf(28f), uf(28f), Shader.TileMode.CLAMP))
         }
         first?.requestFocus()
+        if (Motion.reduced) return
+        // The pane springs up, and its rows follow a beat apart.
+        panel.alpha = 0f
+        panel.scaleX = 0.92f
+        panel.scaleY = 0.92f
+        panel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(280)
+            .setInterpolator(android.view.animation.OvershootInterpolator(1.6f)).start()
+        for (i in 0 until rows.childCount) {
+            val row = rows.getChildAt(i)
+            row.alpha = 0f
+            row.translationY = uf(18f)
+            row.animate().alpha(1f).translationY(0f).setStartDelay(60L + i * 35).setDuration(260)
+                .setInterpolator(android.view.animation.DecelerateInterpolator(2f)).start()
+        }
     }
 
     override fun dismiss() {
