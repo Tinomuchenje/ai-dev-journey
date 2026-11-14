@@ -55,6 +55,18 @@ class HomeActivity : Activity() {
     private lateinit var dateClock: TextClock
     private lateinit var chips: RowLayout
     private var entrancePlayed = false
+    private lateinit var shelf: ShelfTitle
+    private lateinit var saver: ClockSaver
+    private lateinit var inputChip: ChipView
+    private var inputs: List<InputChoice> = emptyList()
+
+    /** Key of the dock tile being moved with the arrow keys, if any. */
+    private var carrying: String? = null
+    private var resumed = false
+
+    /** False while one of our menus (or anything else) is in front. */
+    private var windowFocused = true
+    private val idle = Runnable { startSaver() }
 
     private var apps: List<AppEntry> = emptyList()
     private val siteArt = HashMap<String, Bitmap>()
@@ -89,12 +101,22 @@ class HomeActivity : Activity() {
         override fun onReceive(c: Context, i: Intent) = updateNetwork()
     }
     private val minuteReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) = updateGreeting()
+        override fun onReceive(c: Context, i: Intent) {
+            updateGreeting()
+            if (saver.showing) saver.tick()
+        }
+    }
+
+    // At power-on the home screen starts before Android has unlocked the user's storage, when
+    // most apps are still invisible to it. Load again the moment that changes.
+    private val unlockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) = loadApps()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Dim.init(this)
+        Fonts.init(this)
         store = Store(this)
         Motion.reduced = store.reducedMotion
         buildUi()
@@ -109,6 +131,7 @@ class HomeActivity : Activity() {
                 ambientTint = now.tint
                 applyWallpaper(animate = true)
             }
+            updateShelf()
         }
         observer.addOnScrollChangedListener { lens.invalidate() }
         FocusView.onMotion = { lens.invalidate() }
@@ -128,7 +151,9 @@ class HomeActivity : Activity() {
             registerReceiver(packageReceiver, pkg, Context.RECEIVER_NOT_EXPORTED)
             registerReceiver(networkReceiver, net, Context.RECEIVER_NOT_EXPORTED)
             registerReceiver(minuteReceiver, tick, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(unlockReceiver, IntentFilter(Intent.ACTION_USER_UNLOCKED), Context.RECEIVER_NOT_EXPORTED)
         } else {
+            if (Build.VERSION.SDK_INT >= 24) registerReceiver(unlockReceiver, IntentFilter(Intent.ACTION_USER_UNLOCKED))
             registerReceiver(packageReceiver, pkg)
             registerReceiver(networkReceiver, net)
             registerReceiver(minuteReceiver, tick)
@@ -150,15 +175,32 @@ class HomeActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         immersive()
         updateNetwork()
         updateGreeting()
+        armSaver()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        windowFocused = hasFocus
+        if (hasFocus) armSaver()
+    }
+
+    override fun onPause() {
+        resumed = false
+        main.removeCallbacks(idle)
+        saver.hide()
+        super.onPause()
     }
 
     override fun onDestroy() {
         unregisterReceiver(packageReceiver)
         unregisterReceiver(networkReceiver)
         unregisterReceiver(minuteReceiver)
+        if (Build.VERSION.SDK_INT >= 24) unregisterReceiver(unlockReceiver)
+        main.removeCallbacks(idle)
         FocusView.onMotion = null
         io.shutdown()
         super.onDestroy()
@@ -173,8 +215,44 @@ class HomeActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() = goToTop()
 
-    /** Pressing a direction with nowhere to go gets a small shove back, not silence. */
+    private var swallowUntilUp = 0
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val down = event.action == KeyEvent.ACTION_DOWN
+        // The rest of a press that was already used up (waking the screen, putting a tile down).
+        if (swallowUntilUp == event.keyCode) {
+            if (!down) swallowUntilUp = 0
+            return true
+        }
+        if (saver.showing) {
+            // Any button only wakes the screen; it does not also act on what was underneath.
+            if (down) {
+                saver.hide()
+                armSaver()
+                swallowUntilUp = event.keyCode
+            }
+            return true
+        }
+        armSaver()
+        val held = carrying
+        if (held != null) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> if (down) moveFavorite(held, -1)
+                KeyEvent.KEYCODE_DPAD_RIGHT -> if (down) moveFavorite(held, 1)
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> Unit
+                else -> if (down) {
+                    // OK, Back or anything else puts it down.
+                    swallowUntilUp = event.keyCode
+                    carry(null)
+                }
+            }
+            return true
+        }
+        return steer(event)
+    }
+
+    /** Pressing a direction with nowhere to go gets a small shove back, not silence. */
+    private fun steer(event: KeyEvent): Boolean {
         val dx = when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_LEFT -> -1
             KeyEvent.KEYCODE_DPAD_RIGHT -> 1
@@ -276,31 +354,37 @@ class HomeActivity : Activity() {
         val top = FrameLayout(this).apply {
             clipChildren = false
             clipToPadding = false
-            setPadding(side, u(58), side - u(12), 0)
+            setPadding(side, u(52), side - u(12), 0)
         }
         clockColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         clockColumn.addView(TextClock(this).apply {
             format12Hour = "h:mm"
             format24Hour = "H:mm"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(148f))
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(118f))
             typeface = Fonts.thin
             includeFontPadding = false
             letterSpacing = -0.02f
+            fontFeatureSettings = "tnum"
             setShadowLayer(uf(18f), 0f, uf(3f), 0x40000000)
         })
         dateClock = TextClock(this).apply {
             setTextColor(withAlpha(Color.WHITE, 0.7f))
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(30f))
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, uf(28f))
             typeface = Fonts.regular
             includeFontPadding = false
-            setPadding(u(8), u(4), 0, 0)
+            setPadding(u(6), u(6), 0, 0)
         }
         clockColumn.addView(dateClock)
         updateGreeting()
         top.addView(clockColumn, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.START or Gravity.TOP))
 
         chips = RowLayout(this)
+        inputChip = ChipView(this, Glyphs.INPUT, "Inputs").apply {
+            visibility = View.GONE
+            setOnClickListener { inputsMenu() }
+        }
+        chips.addView(inputChip)
         netChip = ChipView(this, Glyphs.OFFLINE, "Network").apply { setOnClickListener { openNetworkSettings() } }
         chips.addView(netChip)
         chips.addView(ChipView(this, Glyphs.GLOBE, "Browser").apply { setOnClickListener { openBrowserHome() } })
@@ -309,7 +393,16 @@ class HomeActivity : Activity() {
             setOnLongClickListener { openSystemSettings(); true }
         })
         top.addView(chips, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.END or Gravity.TOP))
-        column.addView(top, MATCH_PARENT, u(318))
+        // The shelf's headline sits just above the dock and names what is focused there.
+        shelf = ShelfTitle(this)
+        top.addView(
+            shelf,
+            FrameLayout.LayoutParams(MATCH_PARENT, u(92), Gravity.BOTTOM or Gravity.START).apply {
+                bottomMargin = u(16)
+                rightMargin = u(12)
+            }
+        )
+        column.addView(top, MATCH_PARENT, u(352))
 
         // The dock.
         dockHolder = FrameLayout(this).apply {
@@ -345,7 +438,45 @@ class HomeActivity : Activity() {
         val root = FrameLayout(this)
         root.addView(backdrop, MATCH_PARENT, MATCH_PARENT)
         root.addView(scroll, MATCH_PARENT, MATCH_PARENT)
+        saver = ClockSaver(this)
+        root.addView(saver, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
+    }
+
+    /** What the big line above the dock says right now. */
+    private fun updateShelf() {
+        val tile = focusedTile()
+        shelf.show(
+            when {
+                carrying != null -> "Left or Right to move, OK to place"
+                tile != null && tile.parent === dock -> tile.label
+                else -> null
+            }
+        )
+    }
+
+    private fun armSaver() {
+        main.removeCallbacks(idle)
+        val minutes = store.saverMinutes
+        if (resumed && minutes > 0) main.postDelayed(idle, minutes * 60_000L)
+    }
+
+    private fun startSaver() {
+        // Not over a menu, and not while a tile is in the air.
+        if (!resumed || !windowFocused || carrying != null) {
+            armSaver()
+            return
+        }
+        saver.backdrop = Wallpapers.ambient(ambientTint)
+        saver.show()
+    }
+
+    /** Pick up the dock tile [key] to move it with the arrows, or put it down (null). */
+    private fun carry(key: String?) {
+        val was = carrying
+        carrying = key
+        refresh(key ?: was, true)
+        updateShelf()
     }
 
     private fun updateGreeting() {
@@ -411,16 +542,20 @@ class HomeActivity : Activity() {
             main.post {
                 if (isDestroyed) return@post
                 apps = list
-                seedIfNeeded()
+                // A dock that has just been filled for the first time gets the highlight and the opening.
+                if (seedIfNeeded()) firstRender = true
+                inputs = Inputs.find(this)
+                inputChip.visibility = if (inputs.isEmpty()) View.GONE else View.VISIBLE
                 render()
-                fetchSiteIcons()
+                if (Storage.unlocked(this)) fetchSiteIcons()
             }
         }
     }
 
     /** First run: put the streaming apps that are installed in the dock and add a couple of sites. */
-    private fun seedIfNeeded() {
-        if (store.seeded || apps.isEmpty()) return
+    private fun seedIfNeeded(): Boolean {
+        // Before the TV has finished unlocking, most apps are not visible yet: do not judge by that list.
+        if (store.seeded || apps.isEmpty() || !Storage.unlocked(this)) return false
         val byPackage = apps.associateBy { it.pkg }
         store.favorites = Apps.STARTER_PACKAGES.mapNotNull { byPackage[it]?.key }.take(5)
         if (store.sites.isEmpty()) {
@@ -428,6 +563,7 @@ class HomeActivity : Activity() {
             store.addSite("Google", "https://www.google.com", false)
         }
         store.seeded = true
+        return true
     }
 
     /** Artwork for a pinned site: its real icon when we have it, otherwise its initial. */
@@ -466,12 +602,15 @@ class HomeActivity : Activity() {
             .take(MAX_DOCK)
         val dw = dockCardWidth(docked.size)
         val dh = dw * 9 / 16
-        val drop = uf(42f) + TileView.PAD + DockLayout.INSET
+        if (carrying != null && carrying !in docked) carrying = null
         dock.removeAllViews()
         for (key in docked) {
             val app = appByKey[key]
-            if (app != null) dock.addView(appTile(app, dw, dh, true, drop))
-            else dock.addView(siteTile(siteByKey.getValue(key), dw, dh, true, drop))
+            val tile = if (app != null) appTile(app, dw, dh, true) else siteTile(siteByKey.getValue(key), dw, dh, true)
+            // While one tile is being moved, it stands out and the rest step back.
+            tile.carried = key == carrying
+            if (carrying != null && key != carrying) tile.alpha = 0.4f
+            dock.addView(tile)
         }
         dock.visibility = if (docked.isEmpty()) View.GONE else View.VISIBLE
         dockHint.visibility = if (docked.isEmpty()) View.VISIBLE else View.GONE
@@ -501,6 +640,7 @@ class HomeActivity : Activity() {
             if (Build.VERSION.SDK_INT >= 26) target.isFocusedByDefault = true
             target.requestFocus()
         }
+        updateShelf()
         if (opening) playEntrance()
     }
 
@@ -519,8 +659,8 @@ class HomeActivity : Activity() {
         return if (preferDock) inDock ?: elsewhere else elsewhere ?: inDock
     }
 
-    private fun appTile(app: AppEntry, w: Int, h: Int, inDock: Boolean, drop: Float = uf(42f)) =
-        TileView(this, w, h, drop).apply {
+    private fun appTile(app: AppEntry, w: Int, h: Int, inDock: Boolean) =
+        TileView(this, w, h, caption = !inDock).apply {
             key = app.key
             label = app.label
             art = app.art
@@ -529,8 +669,8 @@ class HomeActivity : Activity() {
             setOnLongClickListener { appMenu(app, inDock); true }
         }
 
-    private fun siteTile(site: Site, w: Int, h: Int, inDock: Boolean, drop: Float = uf(42f)) =
-        TileView(this, w, h, drop).apply {
+    private fun siteTile(site: Site, w: Int, h: Int, inDock: Boolean) =
+        TileView(this, w, h, caption = !inDock).apply {
             key = site.key
             label = site.name
             art = artFor(site)
@@ -678,11 +818,7 @@ class HomeActivity : Activity() {
 
     private fun addFavoriteRows(d: GlassDialog, key: String, inDock: Boolean) {
         if (store.isFavorite(key)) {
-            if (inDock) {
-                d.row("Move left") { moveFavorite(key, -1) }
-                d.row("Move right") { moveFavorite(key, 1) }
-                d.row("Move to front") { moveFavorite(key, Int.MIN_VALUE) }
-            }
+            if (inDock && dock.childCount > 1) d.row("Move") { carry(key) }
             d.row("Remove from Dock") {
                 store.toggleFavorite(key)
                 refresh(key, false)
@@ -709,19 +845,35 @@ class HomeActivity : Activity() {
             toast("Hidden. Bring it back from Settings > Hidden apps.")
             refresh(null, false)
         }
-        d.row("App info") {
-            start(
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.pkg}"))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
+        // Some firmware (CVTE's, for one) has no App info page and no uninstall screen at all.
+        val info = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.pkg}"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (resolves(info)) d.row("App info") { start(info) }
+        @Suppress("DEPRECATION")
+        val remove = listOf(
+            Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:${app.pkg}")),
+            Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.pkg}")),
+        ).firstOrNull { resolves(it) }
+        if (remove != null) d.row("Uninstall", danger = true) { start(remove) }
+        d.show()
+    }
+
+    private fun resolves(intent: Intent): Boolean = try {
+        packageManager.resolveActivity(intent, 0) != null
+    } catch (e: Exception) {
+        false
+    }
+
+    /** HDMI ports, live TV, and whatever else this TV can switch to. */
+    private fun inputsMenu() {
+        val found = inputs
+        if (found.isEmpty()) return
+        if (found.size == 1) {
+            start(Intent(found[0].intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
         }
-        d.row("Uninstall", danger = true) {
-            @Suppress("DEPRECATION")
-            start(
-                Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:${app.pkg}")),
-                Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.pkg}")),
-            )
-        }
+        val d = GlassDialog(this, "Inputs", "Switch to something plugged into the TV.")
+        for (choice in found) d.row(choice.label) { start(Intent(choice.intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
         d.show()
     }
 
@@ -786,6 +938,19 @@ class HomeActivity : Activity() {
         d.row({ "Backdrop: ${Wallpapers.name(store.wallpaper)}" }, keepOpen = true) {
             store.wallpaper = (store.wallpaper + 1) % Wallpapers.count
             applyWallpaper(animate = true)
+        }
+        d.row({
+            when (val m = store.saverMinutes) {
+                0 -> "Clock screensaver: off"
+                else -> "Clock screensaver: after $m minutes"
+            }
+        }, keepOpen = true) {
+            store.saverMinutes = when (store.saverMinutes) {
+                5 -> 15
+                15 -> 0
+                else -> 5
+            }
+            armSaver()
         }
         d.row({ if (store.reducedMotion) "Motion: reduced" else "Motion: full" }, keepOpen = true) {
             store.reducedMotion = !store.reducedMotion

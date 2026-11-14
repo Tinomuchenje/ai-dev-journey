@@ -90,6 +90,7 @@ class BrowserActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Dim.init(this)
+        Fonts.init(this)
         store = Store(this)
 
         root = FrameLayout(this)

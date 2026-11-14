@@ -120,9 +120,9 @@ class MotionReelTest {
         }
 
         frames(45)                       // the opening
-        press(View.FOCUS_RIGHT)          // along the dock
-        press(View.FOCUS_RIGHT)
-        press(View.FOCUS_RIGHT)
+        press(View.FOCUS_RIGHT, 16)      // along the dock; the shelf names each app
+        press(View.FOCUS_RIGHT, 16)
+        press(View.FOCUS_RIGHT, 16)
         press(View.FOCUS_RIGHT, 18)
         a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT)) // nowhere to go
         frames(18)
@@ -131,9 +131,29 @@ class MotionReelTest {
         press(View.FOCUS_LEFT)
         press(View.FOCUS_DOWN, 16)
         press(View.FOCUS_DOWN, 20)       // the page scrolls
-        press(View.FOCUS_RIGHT)
         press(View.FOCUS_UP, 16)
+        press(View.FOCUS_UP, 14)
+        press(View.FOCUS_UP, 20)         // back to the dock
         focused().performLongClick()     // the menu
-        dialogFrames(34)
+        dialogFrames(30)
+        val move = ShadowDialog.getLatestDialog().window!!.decorView.let { root ->
+            val rows = ArrayList<android.widget.TextView>()
+            fun walk(v: View) {
+                if (v is android.widget.TextView && v.isClickable && v.text.toString() == "Move") rows += v
+                if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
+            }
+            walk(root)
+            rows.single()
+        }
+        move.performClick()              // pick the tile up and carry it
+        frames(16)
+        for (code in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+            a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+            frames(14)
+        }
+        a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_CENTER))
+        a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_CENTER))
+        frames(24)
     }
 }

@@ -188,7 +188,8 @@ class HomeScreenTest {
             ShadowLooper.idleMainLooper(16, TimeUnit.MILLISECONDS)
             screen?.draw(scratch)
         }
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+        // A bounded wait: running every pending task would also fire the idle screensaver timer.
+        ShadowLooper.idleMainLooper(1500, TimeUnit.MILLISECONDS)
         screen?.draw(scratch)
     }
 
@@ -416,8 +417,14 @@ class HomeScreenTest {
         assertTrue(dialogRows(ShadowDialog.getLatestDialog()).any { it.text.toString() == "Remove from Dock" })
     }
 
+    private fun key(a: HomeActivity, code: Int) {
+        a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+        a.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+        settle()
+    }
+
     @Test
-    fun dockItemsCanBeAddedReorderedAndRemoved() {
+    fun dockItemsCanBeAddedCarriedToANewPlaceAndRemoved() {
         val a = launch()
         val store = Store(a)
         val before = store.favorites
@@ -428,18 +435,117 @@ class HomeScreenTest {
         assertEquals(before + settingsKey, store.favorites)
         assertTrue("highlight follows it into the dock", focus(a).key == settingsKey && focus(a).parent is DockLayout)
 
+        // Pick it up and carry it with the arrows.
         holdOk(focus(a))
-        pressRow("Move to front")
-        assertEquals(listOf(settingsKey) + before, store.favorites)
-        assertEquals("highlight follows the moved tile", settingsKey, focus(a).key)
-
-        holdOk(focus(a))
-        pressRow("Move right")
+        pressRow("Move")
+        assertTrue("the carried tile is marked", focus(a).carried)
+        assertEquals("Left or Right to move, OK to place", all<ShelfTitle>(content(a)).single().text)
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT)
+        key(a, KeyEvent.KEYCODE_DPAD_LEFT)
+        assertEquals(before.take(3) + settingsKey + before.drop(3), store.favorites)
+        assertEquals("highlight stays on the carried tile", settingsKey, focus(a).key)
+        repeat(6) { key(a, KeyEvent.KEYCODE_DPAD_LEFT) }
+        assertEquals("it stops at the front", listOf(settingsKey) + before, store.favorites)
+        key(a, KeyEvent.KEYCODE_DPAD_RIGHT)
         assertEquals(listOf(before[0], settingsKey) + before.drop(1), store.favorites)
+
+        // OK puts it down without opening the app.
+        key(a, KeyEvent.KEYCODE_DPAD_CENTER)
+        assertFalse(focus(a).carried)
+        assertEquals(null, shadowOf(a).nextStartedActivity)
+        assertEquals("Settings", all<ShelfTitle>(content(a)).single().text)
+        assertTrue("the other tiles are back to full strength", tiles(content(a)).all { it.alpha == 1f })
 
         holdOk(focus(a))
         pressRow("Remove from Dock")
         assertEquals(before, store.favorites)
+    }
+
+    @Test
+    fun theShelfNamesWhateverIsFocusedInTheDock() {
+        val a = launch()
+        val shelf = all<ShelfTitle>(content(a)).single()
+        assertEquals("Netflix", shelf.text)
+        (focus(a).focusSearch(View.FOCUS_RIGHT) as TileView).requestFocus()
+        settle()
+        assertEquals("YouTube", shelf.text)
+        // In the grid each tile carries its own caption, so the shelf goes quiet.
+        (focus(a).focusSearch(View.FOCUS_DOWN) as TileView).requestFocus()
+        settle()
+        assertEquals(null, shelf.text)
+    }
+
+    @Test
+    fun itAnswersTheHomeButtonOfCvteFirmwareAndMayStartAtPowerOn() {
+        // That firmware sends Home as MAIN + HOME + COMMON_HOME; a plain HOME must still match too.
+        val pm = ctx.packageManager
+        for (extra in listOf(null, "android.intent.category.COMMON_HOME")) {
+            val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).setPackage(ctx.packageName)
+            if (extra != null) home.addCategory(extra)
+            val found = pm.queryIntentActivities(home, 0).map { it.activityInfo.name }
+            assertEquals("HOME + $extra", listOf(HomeActivity::class.java.name), found)
+        }
+        val info = pm.getActivityInfo(android.content.ComponentName(ctx, HomeActivity::class.java), 0)
+        assertTrue("allowed to start before the user's storage is unlocked", info.directBootAware)
+    }
+
+    @Test
+    fun beforeTheTvHasUnlockedItDoesNotJudgeWhatIsInstalled() {
+        val users = shadowOf(ctx.getSystemService(Context.USER_SERVICE) as android.os.UserManager)
+        users.setUserUnlocked(false)
+        val a = launch()
+        assertFalse("no dock is chosen from a half-visible app list", Store(a).seeded)
+        users.setUserUnlocked(true)
+        ctx.sendBroadcast(Intent(Intent.ACTION_USER_UNLOCKED))
+        settle()
+        assertTrue(Store(a).seeded)
+        assertEquals("Netflix", focus(a).label)
+    }
+
+    @Test
+    fun theInputsButtonAppearsOnlyWhenTheTvHasASourcePicker() {
+        val plain = launch()
+        assertFalse(all<ChipView>(content(plain)).first { it.contentDescription == "Inputs" }.isShown)
+
+        // Now a TV with CVTE's source picker and live-TV screen.
+        val picker = android.content.ComponentName("com.cvte.tv.globalui", "com.cvte.tv.globalui.InputSourceActivity")
+        val live = android.content.ComponentName("com.cvte.tv.setting", "com.cvte.tv.setting.TvSettingActivity")
+        val pm = shadowOf(ctx.packageManager)
+        for (c in listOf(picker, live)) {
+            @Suppress("DEPRECATION")
+            pm.addResolveInfoForIntent(Intent().setComponent(c), resolveInfo(c.packageName, c.className))
+        }
+        val a = launch()
+        val chip = all<ChipView>(content(a)).first { it.contentDescription == "Inputs" }
+        assertTrue(chip.isShown)
+        chip.performClick()
+        settle()
+        pressRow("HDMI and other inputs")
+        assertEquals(picker, shadowOf(a).nextStartedActivity.component)
+    }
+
+    @Test
+    fun theClockScreensaverComesOnWhenIdleAndTheFirstPressOnlyWakesIt() {
+        val a = launch()
+        val saver = all<ClockSaver>(a.window.decorView).single()
+        assertFalse(saver.showing)
+        ShadowLooper.idleMainLooper(5, TimeUnit.MINUTES)
+        assertTrue("on after five idle minutes", saver.showing)
+        shootHome(a, "screensaver")
+
+        key(a, KeyEvent.KEYCODE_DPAD_CENTER)
+        assertFalse(saver.showing)
+        assertEquals("the waking press did not open the focused app", null, shadowOf(a).nextStartedActivity)
+
+        // Switched off in Settings, it stays off.
+        all<ChipView>(content(a)).first { it.contentDescription == "Settings" }.performClick()
+        settle()
+        pressRow("Clock screensaver: after 5")
+        pressRow("Clock screensaver: after 15")
+        assertEquals(0, Store(a).saverMinutes)
+        ShadowDialog.getLatestDialog().dismiss()
+        ShadowLooper.idleMainLooper(30, TimeUnit.MINUTES)
+        assertFalse(saver.showing)
     }
 
     @Test

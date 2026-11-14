@@ -37,6 +37,7 @@
         <activity
             android:name=".HomeActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale"
+            android:directBootAware="true"
             android:excludeFromRecents="true"
             android:exported="true"
             android:launchMode="singleTask"
@@ -44,10 +45,16 @@
             android:screenOrientation="landscape"
             android:stateNotNeeded="true"
             tools:ignore="DiscouragedApi">
-            <!-- Makes this app selectable as the Home screen. -->
+            <!-- Makes this app selectable as the Home screen.
+                 COMMON_HOME: CVTE firmware (the "SMART_TV" boards on HiSilicon chips) sends the Home
+                 button and the power-on start as MAIN + HOME + COMMON_HOME, which only reaches a home
+                 screen that lists both. A plain HOME intent still matches this filter. Learned from
+                 the device notes in github.com/Gathin23/cleanyourtv. directBootAware above is for the
+                 same firmware: at power-on only a home screen marked that way is allowed to start. -->
             <intent-filter android:priority="2">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.COMMON_HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <!-- Also shows up in the stock launcher's app list so it can be opened once. -->

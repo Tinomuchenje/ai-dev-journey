@@ -2,6 +2,8 @@ package tv.glasshome
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.os.UserManager
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,9 +18,39 @@ class Site(val id: String, var name: String, var url: String, var tvMode: Boolea
         get() = (name.trim().firstOrNull() ?: host.firstOrNull() ?: '?').uppercaseChar().toString()
 }
 
+/**
+ * Where the launcher keeps its data. At power-on Android starts the home screen before
+ * the user's normal storage is unlocked, so a home screen has to keep what it needs to
+ * draw itself in "device-protected" storage, which is readable from the first moment.
+ */
+object Storage {
+    fun of(ctx: Context): Context {
+        val app = ctx.applicationContext ?: ctx
+        if (Build.VERSION.SDK_INT < 24) return app
+        val early = app.createDeviceProtectedStorageContext()
+        try {
+            // Carry over settings saved by a version that used the normal location.
+            if (unlocked(app)) early.moveSharedPreferencesFrom(app, "glass")
+        } catch (e: Exception) {
+            // nothing to move
+        }
+        return early
+    }
+
+    fun unlocked(ctx: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 24) return true
+        val users = ctx.getSystemService(Context.USER_SERVICE) as? UserManager
+        return try {
+            users?.isUserUnlocked ?: true
+        } catch (e: Exception) {
+            true
+        }
+    }
+}
+
 /** Everything the launcher remembers. Small enough that SharedPreferences is plenty. */
 class Store(ctx: Context) {
-    private val sp = ctx.applicationContext.getSharedPreferences("glass", Context.MODE_PRIVATE)
+    private val sp = Storage.of(ctx).getSharedPreferences("glass", Context.MODE_PRIVATE)
 
     /** Ordered keys of pinned items: "app:<component>" or "web:<id>". */
     var favorites: List<String>
@@ -76,6 +108,11 @@ class Store(ctx: Context) {
     var reducedMotion: Boolean
         get() = sp.getBoolean("reducedMotion", false)
         set(v) = sp.edit().putBoolean("reducedMotion", v).apply()
+
+    /** Minutes of stillness before the clock screensaver; 0 turns it off. */
+    var saverMinutes: Int
+        get() = sp.getInt("saverMinutes", 5)
+        set(v) = sp.edit().putInt("saverMinutes", v).apply()
 
     var seeded: Boolean
         get() = sp.getBoolean("seeded", false)

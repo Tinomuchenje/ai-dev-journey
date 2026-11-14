@@ -19,7 +19,7 @@ import java.net.URL
  * straight from the site and kept on disk. Nothing is asked of any third-party service.
  */
 object SiteIcons {
-    private fun file(ctx: Context, site: Site) = File(File(ctx.filesDir, "site-icons").apply { mkdirs() }, site.id + ".png")
+    private fun file(ctx: Context, site: Site) = File(File(Storage.of(ctx).filesDir, "site-icons").apply { mkdirs() }, site.id + ".png")
 
     /** The saved icon, if one was fetched earlier. Cheap enough for the main thread. */
     fun cached(ctx: Context, site: Site): Bitmap? {

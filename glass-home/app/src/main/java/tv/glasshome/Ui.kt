@@ -64,11 +64,36 @@ fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
 fun withAlpha(color: Int, alpha: Float): Int =
     (color and 0x00FFFFFF) or ((alpha.coerceIn(0f, 1f) * 255).roundToInt() shl 24)
 
+/**
+ * The interface is set in Inter (bundled, Latin, 120 KB), cut at four weights from one
+ * variable file. Before Android 8, or if anything goes wrong, the system face is used.
+ */
 object Fonts {
-    val thin: Typeface = Typeface.create("sans-serif-thin", Typeface.NORMAL)
-    val light: Typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
-    val regular: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-    val medium: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    var thin: Typeface = Typeface.create("sans-serif-thin", Typeface.NORMAL)
+        private set
+    var light: Typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+        private set
+    var regular: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+        private set
+    var medium: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        private set
+    private var loaded = false
+
+    fun init(ctx: Context) {
+        if (loaded) return
+        loaded = true
+        if (Build.VERSION.SDK_INT < 26) return
+        try {
+            fun weight(w: Int) = Typeface.Builder(ctx.assets, "inter.ttf").setFontVariationSettings("'wght' $w").build()
+            val cut = listOf(weight(200), weight(300), weight(400), weight(560))
+            thin = cut[0]
+            light = cut[1]
+            regular = cut[2]
+            medium = cut[3]
+        } catch (e: Exception) {
+            // keep the system faces
+        }
+    }
 }
 
 /** Ink used for text and glyphs on a focused (white) control. */
@@ -218,6 +243,7 @@ object Glyphs {
     const val WIRED = 5
     const val OFFLINE = 6
     const val EYE_OFF = 7
+    const val INPUT = 8
 
     private val path = Path()
     private val oval = RectF()
@@ -290,6 +316,17 @@ object Glyphs {
                 c.drawPath(path, p)
                 p.style = Paint.Style.FILL
                 for (dx in floatArrayOf(-0.36f, 0f, 0.36f)) c.drawCircle(cx + r * dx, cy, size * 0.06f, p)
+            }
+            INPUT -> {
+                // A screen with an arrow going into it.
+                oval.set(cx - r, cy - r * 0.72f, cx + r, cy + r * 0.72f)
+                c.drawRoundRect(oval, r * 0.22f, r * 0.22f, p)
+                c.drawLine(cx - r * 0.5f, cy, cx + r * 0.38f, cy, p)
+                path.rewind()
+                path.moveTo(cx + r * 0.08f, cy - r * 0.3f)
+                path.lineTo(cx + r * 0.4f, cy)
+                path.lineTo(cx + r * 0.08f, cy + r * 0.3f)
+                c.drawPath(path, p)
             }
             EYE_OFF -> {
                 path.rewind()

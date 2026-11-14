@@ -151,8 +151,17 @@ class TileView(
     ctx: Context,
     val cardW: Int,
     val cardH: Int,
-    private val labelDrop: Float = uf(42f),
+    /** False in the dock, where the shelf above names the focused app instead. */
+    private val caption: Boolean = true,
 ) : FocusView(ctx) {
+    private val labelDrop = uf(42f)
+
+    /** Picked up to be moved: held a little larger until it is put down. */
+    var carried = false
+        set(v) {
+            field = v
+            invalidate()
+        }
     var key = ""
     var label = ""
         set(v) {
@@ -216,7 +225,7 @@ class TileView(
         }
     }
 
-    private fun scale() = (1f + SCALE * lift) * (if (isPressed) 0.96f else 1f)
+    private fun scale() = (1f + SCALE * lift + (if (carried) 0.07f else 0f)) * (if (isPressed) 0.96f else 1f)
 
     /** Where the card is right now, in this view's own coordinates, growth included. */
     fun cardRect(out: RectF) {
@@ -227,7 +236,7 @@ class TileView(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(cardW + pad * 2, cardH + pad * 2 + LABEL_H)
+        setMeasuredDimension(cardW + pad * 2, cardH + pad * 2 + (if (caption) LABEL_H else 0))
     }
 
     override fun onDraw(c: Canvas) {
@@ -271,7 +280,7 @@ class TileView(
         c.restore()
 
         // Like tvOS, only the focused tile is captioned.
-        if (glow > 0.01f) {
+        if (caption && glow > 0.01f) {
             val text = fitted ?: TextUtils.ellipsize(
                 label, labelPaint, cardW * 1.25f, TextUtils.TruncateAt.END
             ).toString().also { fitted = it }
@@ -632,18 +641,151 @@ class DockLayout(ctx: Context) : RowLayout(ctx) {
 
     init {
         setWillNotDraw(false)
-        setPadding(INSET, INSET, INSET, 0)
+        setPadding(INSET, INSET, INSET, INSET)
     }
 
     override fun onDraw(c: Canvas) {
-        // The tray ends under the tiles; the caption of the focused tile hangs below it.
-        val bottom = height - TileView.LABEL_H + INSET
-        Shadow.draw(c, 0f, 0f, width, bottom, radius, uf(26f), Color.BLACK, 0.4f, uf(4f), true)
-        glass.setBounds(0, 0, width, bottom)
+        Shadow.draw(c, 0f, 0f, width, height, radius, uf(26f), Color.BLACK, 0.4f, uf(4f), true)
+        glass.setBounds(0, 0, width, height)
         glass.draw(c)
     }
 
     companion object {
         val INSET get() = u(8)
+    }
+}
+
+/**
+ * The top shelf's headline: the name of whatever is focused in the dock, in large light
+ * type. When it changes, the old name lifts away as the new one rises into its place.
+ */
+class ShelfTitle(ctx: Context) : View(ctx) {
+    private var now: String? = null
+    private var before: String? = null
+    private var mix = 1f
+    private var anim: ValueAnimator? = null
+    private val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        typeface = Fonts.light
+        textSize = uf(64f)
+        letterSpacing = -0.015f
+        setShadowLayer(uf(14f), 0f, uf(2f), 0x59000000)
+    }
+
+    val text: String? get() = now
+
+    fun show(text: String?) {
+        if (text == now) return
+        before = now
+        now = text
+        anim?.cancel()
+        if (Motion.reduced || !isAttachedToWindow) {
+            mix = 1f
+            invalidate()
+            return
+        }
+        mix = 0f
+        anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 260
+            interpolator = DecelerateInterpolator(1.8f)
+            addUpdateListener {
+                mix = it.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+    }
+
+    override fun onDraw(c: Canvas) {
+        val base = height - paint.descent() - uf(4f)
+        val old = before
+        if (old != null && mix < 1f) {
+            paint.alpha = (255 * (1f - mix)).roundToInt()
+            c.drawText(fit(old), 0f, base - uf(18f) * mix, paint)
+        }
+        now?.let {
+            paint.alpha = (255 * mix).roundToInt()
+            c.drawText(fit(it), 0f, base + uf(18f) * (1f - mix), paint)
+        }
+    }
+
+    private fun fit(t: String) = TextUtils.ellipsize(t, paint, width.toFloat(), TextUtils.TruncateAt.END).toString()
+
+    override fun onDetachedFromWindow() {
+        anim?.cancel()
+        super.onDetachedFromWindow()
+    }
+}
+
+/**
+ * The screensaver: the time, large and thin, over a dim wash of colour. Once a minute it
+ * redraws with the new time somewhere else on the screen, so nothing sits in one place
+ * long enough to mark the panel. Between those redraws it does no work at all.
+ */
+class ClockSaver(ctx: Context) : View(ctx) {
+    var backdrop: Bitmap? = null
+    private var fx = 0.5f
+    private var fy = 0.5f
+    private val image = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val dst = RectF()
+    private val time = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        typeface = Fonts.thin
+        textSize = uf(250f)
+        letterSpacing = -0.02f
+        fontFeatureSettings = "tnum"
+    }
+    private val date = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xB3FFFFFF.toInt()
+        typeface = Fonts.regular
+        textSize = uf(38f)
+    }
+
+    val showing: Boolean get() = visibility == VISIBLE
+
+    init {
+        visibility = GONE
+    }
+
+    /** A new minute: move somewhere else and redraw. */
+    fun tick() {
+        fx = Math.random().toFloat()
+        fy = Math.random().toFloat()
+        invalidate()
+    }
+
+    fun show() {
+        if (showing) return
+        tick()
+        animate().cancel()
+        alpha = 0f
+        visibility = VISIBLE
+        if (Motion.reduced) alpha = 1f else animate().setStartDelay(0).alpha(1f).setDuration(900).start()
+    }
+
+    fun hide() {
+        if (!showing) return
+        animate().cancel()
+        visibility = GONE
+    }
+
+    override fun onDraw(c: Canvas) {
+        c.drawColor(Color.BLACK)
+        backdrop?.let {
+            dst.set(0f, 0f, width.toFloat(), height.toFloat())
+            image.alpha = 110
+            c.drawBitmap(it, null, dst, image)
+        }
+        val moment = java.util.Date()
+        val pattern = if (android.text.format.DateFormat.is24HourFormat(context)) "H:mm" else "h:mm"
+        val clock = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).format(moment)
+        val day = java.text.SimpleDateFormat("EEEE, d MMMM", java.util.Locale.getDefault()).format(moment)
+        val w = maxOf(time.measureText(clock), date.measureText(day))
+        val blockH = uf(250f) + uf(60f)
+        val margin = uf(110f)
+        val x = margin + (width - 2 * margin - w).coerceAtLeast(0f) * fx
+        val y = margin + (height - 2 * margin - blockH).coerceAtLeast(0f) * fy
+        c.drawText(clock, x - uf(10f), y + uf(200f), time)
+        c.drawText(day, x, y + uf(276f), date)
     }
 }
